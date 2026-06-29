@@ -177,6 +177,12 @@ public sealed class BatchTaskBackgroundService : BackgroundService
                 _logger.LogInformation("Batch task completed: {TaskId} {TaskType} (completed={Completed}, failed={Failed})",
                     pending.Id, pending.TaskType, completed, failed);
             }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // 宿主停机/容器重启时不要把正在执行的任务写成失败。
+                // 保持 running 状态，下一次启动由 RecoverInterruptedTasksAsync 重新排队。
+                _logger.LogInformation("Batch task interrupted by shutdown: {TaskId} {TaskType}", pending.Id, pending.TaskType);
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Batch task failed: {TaskId} {TaskType}", pending.Id, pending.TaskType);
