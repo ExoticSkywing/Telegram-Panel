@@ -1,5 +1,13 @@
 <template>
   <div class="monitor-notify-page" v-loading="loading">
+    <ExtensionLegacyFallback
+      v-if="shouldUseLegacyModulePage(loadError)"
+      module-id="pro.bot-monitor-notify"
+      page-key="settings"
+      :load-error="loadError"
+      @retry="load"
+    />
+    <template v-else>
     <div class="stat-grid mb-3">
       <el-card shadow="never" class="stat-card">
         <div class="stat-label">模块总开关</div>
@@ -275,6 +283,7 @@
         </el-col>
       </el-row>
     </template>
+    </template>
   </div>
 </template>
 
@@ -283,7 +292,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { Delete, Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { panelApi } from '@/api/panel'
+import ExtensionLegacyFallback from '@/components/ExtensionLegacyFallback.vue'
 import { formatTime } from '@/utils/format'
+import { buildExtensionLoadError, shouldUseLegacyModulePage, type ExtensionLoadError } from '@/utils/extensionErrors'
 import type {
   MonitorNotifyAccount,
   MonitorNotifyBot,
@@ -305,6 +316,7 @@ const sourceSearch = ref('')
 const targetSearch = ref('')
 const sourceManualIdsText = ref('')
 const targetManualIdsText = ref('')
+const loadError = ref<ExtensionLoadError | null>(null)
 const sourceToAdd = reactive(new Set<number>())
 const targetToAdd = reactive(new Set<number>())
 
@@ -354,6 +366,7 @@ const orderedTargets = computed(() => [...(currentTask.value?.targetChannels || 
 async function load() {
   loading.value = true
   try {
+    loadError.value = null
     const page = await panelApi.monitorNotify()
     Object.assign(settings, normalizeSettings(page.settings))
     Object.assign(runtime, page.runtime)
@@ -363,6 +376,9 @@ async function load() {
       selectedTaskId.value = settings.tasks[0]?.id || ''
     }
     await loadTaskOptions()
+  } catch (error) {
+    const center = await panelApi.modules().catch(() => ({ modules: [] }))
+    loadError.value = buildExtensionLoadError('监控频道更新通知', 'pro.bot-monitor-notify', error, center.modules)
   } finally {
     loading.value = false
   }

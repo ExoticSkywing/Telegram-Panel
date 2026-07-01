@@ -1,6 +1,13 @@
 <template>
   <div class="sync-forward-page">
-    <el-tabs v-model="activeTab" type="border-card" class="page-tabs" v-loading="loading">
+    <ExtensionLegacyFallback
+      v-if="shouldUseLegacyModulePage(loadError)"
+      module-id="pro.sync-forward"
+      page-key="settings"
+      :load-error="loadError"
+      @retry="load"
+    />
+    <el-tabs v-else v-model="activeTab" type="border-card" class="page-tabs" v-loading="loading">
       <el-tab-pane label="仪表盘" name="dashboard">
         <div class="stat-grid mb-3">
           <el-card shadow="never" class="stat-card">
@@ -211,7 +218,13 @@ re:https://t\.me/c/\d+/(\d+) =&gt; https://t.me/c/{channelid}/$1</pre>
       </el-tab-pane>
     </el-tabs>
 
-    <el-dialog v-model="editor.visible" :title="editor.isNew ? '新增 Route' : '编辑 Route'" width="760px" class="route-dialog">
+    <el-dialog
+      v-if="!shouldUseLegacyModulePage(loadError)"
+      v-model="editor.visible"
+      :title="editor.isNew ? '新增 Route' : '编辑 Route'"
+      width="760px"
+      class="route-dialog"
+    >
       <el-tabs v-model="editor.tab">
         <el-tab-pane label="基本设置" name="basic">
           <el-form v-if="editor.route" label-position="top">
@@ -364,7 +377,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { Delete, Edit, Plus, Refresh, RefreshRight, VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { panelApi } from '@/api/panel'
+import ExtensionLegacyFallback from '@/components/ExtensionLegacyFallback.vue'
 import { formatTime } from '@/utils/format'
+import { buildExtensionLoadError, shouldUseLegacyModulePage, type ExtensionLoadError } from '@/utils/extensionErrors'
 import type {
   SyncForwardAccount,
   SyncForwardBot,
@@ -383,6 +398,7 @@ const loading = ref(false)
 const savingSettings = ref(false)
 const savingRoute = ref(false)
 const cleaningTemp = ref(false)
+const loadError = ref<ExtensionLoadError | null>(null)
 
 const settings = reactive<SyncForwardSettings>({
   pollIntervalSeconds: 3,
@@ -431,6 +447,7 @@ const stoppedRouteCount = computed(() => stoppedRoutes.value.length)
 async function load() {
   loading.value = true
   try {
+    loadError.value = null
     const page = await panelApi.syncForward()
     Object.assign(settings, page.settings)
     Object.assign(runtime, page.runtime)
@@ -438,6 +455,9 @@ async function load() {
     bots.value = page.bots
     accounts.value = page.accounts
     routeStates.value = page.routeStates || {}
+  } catch (error) {
+    const center = await panelApi.modules().catch(() => ({ modules: [] }))
+    loadError.value = buildExtensionLoadError('频道同步转发', 'pro.sync-forward', error, center.modules)
   } finally {
     loading.value = false
   }

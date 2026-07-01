@@ -1,5 +1,13 @@
 <template>
   <div class="channel-push-page">
+    <ExtensionLegacyFallback
+      v-if="shouldUseLegacyModulePage(loadError)"
+      module-id="pro.channel-push"
+      page-key="settings"
+      :load-error="loadError"
+      @retry="load"
+    />
+    <template v-else>
     <el-alert
       v-if="loadError"
       :title="loadError.title"
@@ -504,6 +512,7 @@
         <el-button type="primary" :loading="bindDialog.saving" @click="saveCreativeBind">确定</el-button>
       </template>
     </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -513,6 +522,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Check, Delete, MoreFilled, Plus, Refresh } from '@element-plus/icons-vue'
 import { panelApi } from '@/api/panel'
+import ExtensionLegacyFallback from '@/components/ExtensionLegacyFallback.vue'
 import type {
   ChannelPushBot,
   ChannelPushCategory,
@@ -530,7 +540,7 @@ import type {
   ChannelPushStats,
 } from '@/api/types'
 import { formatTime } from '@/utils/format'
-import { buildExtensionLoadError, type ExtensionLoadError } from '@/utils/extensionErrors'
+import { buildExtensionLoadError, shouldUseLegacyModulePage, type ExtensionLoadError } from '@/utils/extensionErrors'
 
 const router = useRouter()
 const loading = ref(false)

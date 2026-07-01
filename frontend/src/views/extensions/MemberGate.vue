@@ -1,6 +1,13 @@
 <template>
   <div class="member-gate-page" v-loading="loading">
-    <el-tabs v-model="activeTab" type="border-card" class="page-tabs">
+    <ExtensionLegacyFallback
+      v-if="shouldUseLegacyModulePage(loadError)"
+      module-id="pro.channel-member-gate"
+      page-key="settings"
+      :load-error="loadError"
+      @retry="load"
+    />
+    <el-tabs v-else v-model="activeTab" type="border-card" class="page-tabs">
       <el-tab-pane label="仪表盘" name="dashboard">
         <el-row :gutter="12">
           <el-col :xs="24" :md="12">
@@ -274,7 +281,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { Delete, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { panelApi } from '@/api/panel'
+import ExtensionLegacyFallback from '@/components/ExtensionLegacyFallback.vue'
 import { formatTime } from '@/utils/format'
+import { buildExtensionLoadError, shouldUseLegacyModulePage, type ExtensionLoadError } from '@/utils/extensionErrors'
 import type {
   MemberGateBot,
   MemberGateBotChannel,
@@ -295,6 +304,7 @@ const masterCategoryId = ref(0)
 const masterSearch = ref('')
 const childCategoryId = ref(0)
 const childSearch = ref('')
+const loadError = ref<ExtensionLoadError | null>(null)
 const childBotToAdd = reactive(new Set<number>())
 
 const settings = reactive<MemberGateSettings>({
@@ -331,6 +341,7 @@ const orderedChildChannels = computed(() => [...(currentRule.value?.childChannel
 async function load() {
   loading.value = true
   try {
+    loadError.value = null
     const page = await panelApi.memberGate()
     Object.assign(settings, normalizeSettings(page.settings))
     Object.assign(runtime, page.runtime)
@@ -343,6 +354,9 @@ async function load() {
     if (currentRule.value?.botId && !botChannels.value.some((x) => x.telegramId === currentRule.value?.masterChannelId)) {
       await refreshBotChannels()
     }
+  } catch (error) {
+    const center = await panelApi.modules().catch(() => ({ modules: [] }))
+    loadError.value = buildExtensionLoadError('频道成员准入与联动踢出', 'pro.channel-member-gate', error, center.modules)
   } finally {
     loading.value = false
   }

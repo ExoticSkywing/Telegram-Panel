@@ -83,6 +83,14 @@ export function buildExtensionLoadError(
   }
 }
 
+export function shouldUseLegacyModulePage(error: ExtensionLoadError | null | undefined) {
+  return Boolean(error?.status === 404 && error.module?.enabled && !error.module?.manifestError)
+}
+
+export function legacyModulePageUrl(moduleId: string, pageKey: string) {
+  return `/ext/${encodeURIComponent(moduleId)}/${encodeURIComponent(pageKey)}?legacy=1&embed=1`
+}
+
 function extractServerMessage(error: AxiosLikeError) {
   const data = error?.response?.data
   if (!data) return ''

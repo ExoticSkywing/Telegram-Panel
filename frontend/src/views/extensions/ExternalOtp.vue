@@ -1,5 +1,13 @@
 <template>
   <div class="external-otp-page" v-loading="loading">
+    <ExtensionLegacyFallback
+      v-if="shouldUseLegacyModulePage(loadError)"
+      module-id="pro.external-otp"
+      page-key="protocol-api"
+      :load-error="loadError"
+      @retry="load"
+    />
+    <template v-else>
     <el-alert
       v-if="loadError"
       :title="loadError.title"
@@ -141,6 +149,7 @@
       </div>
       <el-input v-model="exportText" type="textarea" :rows="10" readonly />
     </el-card>
+    </template>
   </div>
 </template>
 
@@ -150,8 +159,9 @@ import { useRouter } from 'vue-router'
 import { Back, DocumentCopy, EditPen, Link as LinkIcon, Refresh, RefreshRight, Search, Select, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { panelApi } from '@/api/panel'
+import ExtensionLegacyFallback from '@/components/ExtensionLegacyFallback.vue'
 import type { ExternalOtpAccount, ExternalOtpCategory } from '@/api/types'
-import { buildExtensionLoadError, type ExtensionLoadError } from '@/utils/extensionErrors'
+import { buildExtensionLoadError, shouldUseLegacyModulePage, type ExtensionLoadError } from '@/utils/extensionErrors'
 
 const router = useRouter()
 const loading = ref(false)
