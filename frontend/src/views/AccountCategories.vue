@@ -11,7 +11,7 @@
           <el-form-item label="分类名称">
             <el-input v-model="createForm.name" />
           </el-form-item>
-          <el-form-item label="分类颜色">
+          <el-form-item label="分类文字颜色">
             <div class="color-row">
               <el-color-picker v-model="createForm.color" />
               <el-input v-model="createForm.color" />
@@ -40,11 +40,19 @@
           <el-table v-loading="loading" :data="categories" stripe>
             <el-table-column label="分类名称" min-width="150">
               <template #default="{ row }">
-                <el-tag :color="row.color || '#9E9E9E'" effect="plain">{{ row.name }}</el-tag>
+                <el-tag
+                  effect="plain"
+                  class="category-name-tag"
+                  :style="{ color: categoryColor(row), borderColor: categoryColor(row) }"
+                >
+                  {{ row.name }}
+                </el-tag>
               </template>
             </el-table-column>
             <el-table-column label="颜色" width="90">
-              <template #default="{ row }"><span class="swatch" :style="{ backgroundColor: row.color || '#9E9E9E' }" /></template>
+              <template #default="{ row }">
+                <span class="text-color-sample" :style="{ color: categoryColor(row), borderColor: categoryColor(row) }">A</span>
+              </template>
             </el-table-column>
             <el-table-column prop="description" label="描述" min-width="180">
               <template #default="{ row }">{{ row.description || '-' }}</template>
@@ -112,7 +120,7 @@
         <el-form-item label="分类名称">
           <el-input v-model="editDialog.form.name" />
         </el-form-item>
-        <el-form-item label="分类颜色">
+        <el-form-item label="分类文字颜色">
           <div class="color-row">
             <el-color-picker v-model="editDialog.form.color" />
             <el-input v-model="editDialog.form.color" />
@@ -246,6 +254,10 @@ function openEdit(category: AccountCategory) {
   editDialog.visible = true
 }
 
+function categoryColor(category: AccountCategory) {
+  return category.color || '#9E9E9E'
+}
+
 async function saveEdit() {
   editDialog.saving = true
   try {
@@ -331,12 +343,20 @@ onMounted(loadAll)
   width: 100%;
 }
 
-.swatch {
-  display: inline-block;
+.category-name-tag {
+  background: transparent;
+}
+
+.text-color-sample {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 30px;
   height: 30px;
   border-radius: 4px;
   border: 1px solid var(--tp-border);
+  background: transparent;
+  font-weight: 700;
 }
 
 @media (max-width: 980px) {

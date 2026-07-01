@@ -1,6 +1,27 @@
 <template>
   <div class="channel-push-page">
     <el-alert
+      v-if="loadError"
+      :title="loadError.title"
+      type="error"
+      :closable="false"
+      show-icon
+      class="mb-3"
+    >
+      <div class="extension-error-body">
+        <div>{{ loadError.description }}</div>
+        <div v-if="loadError.status" class="cell-sub">HTTP 状态：{{ loadError.status }}</div>
+        <div v-if="loadError.module" class="cell-sub">
+          模块版本：{{ loadError.module.activeVersion || '-' }}；Last Good：{{ loadError.module.lastGoodVersion || '-' }}
+        </div>
+        <div class="toolbar mt-3">
+          <el-button size="small" type="primary" @click="load">重新加载</el-button>
+          <el-button size="small" @click="router.push('/modules')">打开模块管理</el-button>
+        </div>
+      </div>
+    </el-alert>
+
+    <el-alert
       v-if="!runtime.isRunning"
       title="后台调度器未启动：定时推送不会执行。安装或更新模块后请重启主程序或容器。"
       type="warning"
@@ -488,6 +509,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Check, Delete, MoreFilled, Plus, Refresh } from '@element-plus/icons-vue'
 import { panelApi } from '@/api/panel'
@@ -508,12 +530,15 @@ import type {
   ChannelPushStats,
 } from '@/api/types'
 import { formatTime } from '@/utils/format'
+import { buildExtensionLoadError, type ExtensionLoadError } from '@/utils/extensionErrors'
 
+const router = useRouter()
 const loading = ref(false)
 const loadingLogs = ref(false)
 const savingSettings = ref(false)
 const activeTab = ref('dashboard')
 const runningAction = ref('')
+const loadError = ref<ExtensionLoadError | null>(null)
 
 const stats = ref<ChannelPushStats>({ groups: 0, channels: 0, slots: 0, creatives: 0 })
 const runtime = ref<ChannelPushRuntime>({ isRunning: false })
@@ -631,6 +656,7 @@ const currentTimeInZone = computed(() => {
 async function load() {
   loading.value = true
   try {
+    loadError.value = null
     const page = await panelApi.channelPush()
     stats.value = page.stats
     runtime.value = page.runtime
@@ -645,6 +671,9 @@ async function load() {
     slotNames.value = page.slotNames || {}
     creativeCounts.value = page.creativeCounts || {}
     adminIdsText.value = (page.settings.adminIds || []).join('\n')
+  } catch (error) {
+    const center = await panelApi.modules().catch(() => ({ modules: [] }))
+    loadError.value = buildExtensionLoadError('频道广告推送', 'pro.channel-push', error, center.modules)
   } finally {
     loading.value = false
   }
@@ -1220,5 +1249,10 @@ onMounted(load)
 
 .mr-2 {
   margin-right: 8px;
+}
+
+.extension-error-body {
+  display: grid;
+  gap: 6px;
 }
 </style>

@@ -1,6 +1,27 @@
 <template>
   <div class="external-otp-page" v-loading="loading">
     <el-alert
+      v-if="loadError"
+      :title="loadError.title"
+      type="error"
+      :closable="false"
+      show-icon
+      class="mb-3"
+    >
+      <div class="extension-error-body">
+        <div>{{ loadError.description }}</div>
+        <div v-if="loadError.status" class="cell-sub">HTTP 状态：{{ loadError.status }}</div>
+        <div v-if="loadError.module" class="cell-sub">
+          模块版本：{{ loadError.module.activeVersion || '-' }}；Last Good：{{ loadError.module.lastGoodVersion || '-' }}
+        </div>
+        <div class="toolbar mt-3">
+          <el-button size="small" type="primary" @click="load">重新加载</el-button>
+          <el-button size="small" @click="router.push('/modules')">打开模块管理</el-button>
+        </div>
+      </div>
+    </el-alert>
+
+    <el-alert
       title="这是匿名外链：拿到链接的人可以看到该账号的手机号与登录验证码。请妥善保管链接；如怀疑泄露，立即刷新 Token。"
       type="warning"
       :closable="false"
@@ -125,11 +146,14 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Back, DocumentCopy, EditPen, Link as LinkIcon, Refresh, RefreshRight, Search, Select, Upload } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { panelApi } from '@/api/panel'
 import type { ExternalOtpAccount, ExternalOtpCategory } from '@/api/types'
+import { buildExtensionLoadError, type ExtensionLoadError } from '@/utils/extensionErrors'
 
+const router = useRouter()
 const loading = ref(false)
 const categories = ref<ExternalOtpCategory[]>([])
 const accounts = ref<ExternalOtpAccount[]>([])
@@ -142,6 +166,7 @@ const announcementSaving = ref(false)
 const announcementDraft = ref('')
 const exportText = ref('')
 const exportCount = ref(0)
+const loadError = ref<ExtensionLoadError | null>(null)
 
 const filters = reactive({
   categoryId: 0,
@@ -156,10 +181,14 @@ const selectedIds = computed(() => selectedRows.value.map((x) => x.id))
 async function load() {
   loading.value = true
   try {
+    loadError.value = null
     const page = await panelApi.externalOtp()
     categories.value = page.categories
     soldCategoryId.value = page.soldCategoryId || null
     announcementDraft.value = page.announcementHtml || ''
+  } catch (error) {
+    const center = await panelApi.modules().catch(() => ({ modules: [] }))
+    loadError.value = buildExtensionLoadError('协议号转API', 'pro.external-otp', error, center.modules)
   } finally {
     loading.value = false
   }
@@ -360,6 +389,11 @@ onMounted(load)
 
 .ml-2 {
   margin-left: 8px;
+}
+
+.extension-error-body {
+  display: grid;
+  gap: 6px;
 }
 
 @media (max-width: 640px) {
