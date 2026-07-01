@@ -13,9 +13,29 @@
 
 <body>
     <Routes @rendermode="ServerRenderMode" />
-    <script src="_framework/blazor.web.js"></script>
+    <div id="components-reconnect-modal">
+        <div class="components-reconnect-show">连接中断，正在重新连接...</div>
+        <div class="components-reconnect-failed">
+            连接已断开。
+            <button type="button" onclick="location.reload()">刷新页面</button>
+        </div>
+        <div class="components-reconnect-rejected">
+            服务器拒绝恢复当前页面，请刷新后重试。
+            <button type="button" onclick="location.reload()">刷新页面</button>
+        </div>
+    </div>
+    <div id="blazor-error-ui">
+        <strong>页面运行出错。</strong>
+        <span id="blazor-error-message">请刷新页面重试；如果这是旧模块页面，请复制浏览器控制台错误继续排查。</span>
+        <button type="button" class="reload" onclick="location.reload()">刷新</button>
+        <button type="button" class="dismiss" onclick="this.parentElement.style.display='none'">关闭</button>
+    </div>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
     <script src="app.js"></script>
+    <script src="_framework/blazor.web.js" autostart="false"></script>
+    <script>
+        window.telegramPanel && window.telegramPanel.startBlazor && window.telegramPanel.startBlazor();
+    </script>
 </body>
 
 </html>

@@ -1,5 +1,36 @@
 window.telegramPanel = window.telegramPanel || {};
 
+window.telegramPanel.showBlazorError = (message) => {
+  const ui = document.getElementById("blazor-error-ui");
+  const text = document.getElementById("blazor-error-message");
+  if (text && message) text.textContent = String(message);
+  if (ui) ui.style.display = "block";
+};
+
+window.telegramPanel.startBlazor = async () => {
+  if (!window.Blazor || !window.Blazor.start) {
+    window.telegramPanel.showBlazorError("Blazor 脚本未正确加载，请检查 _framework/blazor.web.js。");
+    return;
+  }
+
+  try {
+    await window.Blazor.start({
+      circuit: {
+        reconnectionOptions: {
+          maxRetries: 8,
+          retryIntervalMilliseconds: 1500,
+        },
+      },
+    });
+  } catch (error) {
+    console.error(error);
+    const message = error && error.message
+      ? error.message
+      : "Blazor Server 连接启动失败，请检查反向代理是否支持 /_blazor WebSocket。";
+    window.telegramPanel.showBlazorError(message);
+  }
+};
+
 window.telegramPanel.copyText = async (text) => {
   if (text === null || text === undefined) return;
   const value = String(text);

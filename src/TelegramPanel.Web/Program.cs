@@ -318,7 +318,12 @@ TaskScheduler.UnobservedTaskException += (_, e) =>
 
 // Add services to the container.
 builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
+    .AddInteractiveServerComponents(options =>
+    {
+        options.DetailedErrors = true;
+        options.DisconnectedCircuitRetentionPeriod = TimeSpan.FromMinutes(5);
+        options.DisconnectedCircuitMaxRetained = 200;
+    });
 
 // MudBlazor
 builder.Services.AddMudServices();

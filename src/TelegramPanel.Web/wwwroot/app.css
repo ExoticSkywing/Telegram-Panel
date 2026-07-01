@@ -1,5 +1,75 @@
 /* 移动端自适应增强：避免按钮文字被挤成“竖排” */
 
+#blazor-error-ui {
+  display: none;
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 10000;
+  max-width: min(560px, calc(100vw - 32px));
+  padding: 12px 14px;
+  border: 1px solid #f5c2c7;
+  border-radius: 6px;
+  background: #f8d7da;
+  color: #842029;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.2);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+#blazor-error-ui button {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid rgba(132, 32, 41, 0.35);
+  border-radius: 4px;
+  background: #fff;
+  color: #842029;
+  cursor: pointer;
+}
+
+#components-reconnect-modal {
+  display: none;
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  z-index: 9999;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid rgba(25, 118, 210, 0.28);
+  border-radius: 6px;
+  background: #ffffff;
+  color: #1f2937;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.2);
+  font-size: 14px;
+}
+
+#components-reconnect-modal.components-reconnect-show,
+#components-reconnect-modal.components-reconnect-failed,
+#components-reconnect-modal.components-reconnect-rejected {
+  display: block;
+}
+
+#components-reconnect-modal > div {
+  display: none;
+}
+
+#components-reconnect-modal.components-reconnect-show .components-reconnect-show,
+#components-reconnect-modal.components-reconnect-failed .components-reconnect-failed,
+#components-reconnect-modal.components-reconnect-rejected .components-reconnect-rejected {
+  display: block;
+}
+
+#components-reconnect-modal button {
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid #d8dee8;
+  border-radius: 4px;
+  background: #f7f9fc;
+  color: #1f2937;
+  cursor: pointer;
+}
+
 .tp-flex-wrap {
   flex-wrap: wrap !important;
 }
