@@ -23,4 +23,41 @@
     <ProjectReference Include="..\TelegramPanel.Modules.Abstractions\TelegramPanel.Modules.Abstractions.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Remove="Modules\state.json" />
+    <Content Remove="Modules\active\**" />
+    <Content Remove="Modules\data\**" />
+    <Content Remove="Modules\packages\**" />
+    <Content Remove="Modules\installed\**" />
+    <Content Remove="Modules\staging\**" />
+    <Content Remove="Modules\trash\**" />
+    <Content Remove="sessions\**" />
+    <Content Remove="session数据\**" />
+    <Content Remove="logs\**" />
+    <Content Remove="data-protection-keys\**" />
+    <Content Remove="uploads\**" />
+    <Content Remove="*.db" />
+    <Content Remove="*.db-shm" />
+    <Content Remove="*.db-wal" />
+    <Content Remove="admin_auth.json" />
+    <Content Remove="appsettings.local.json" />
+    <None Remove="Modules\state.json" />
+    <None Remove="Modules\active\**" />
+    <None Remove="Modules\data\**" />
+    <None Remove="Modules\packages\**" />
+    <None Remove="Modules\installed\**" />
+    <None Remove="Modules\staging\**" />
+    <None Remove="Modules\trash\**" />
+    <None Remove="sessions\**" />
+    <None Remove="session数据\**" />
+    <None Remove="logs\**" />
+    <None Remove="data-protection-keys\**" />
+    <None Remove="uploads\**" />
+    <None Remove="*.db" />
+    <None Remove="*.db-shm" />
+    <None Remove="*.db-wal" />
+    <None Remove="admin_auth.json" />
+    <None Remove="appsettings.local.json" />
+  </ItemGroup>
+
 </Project>

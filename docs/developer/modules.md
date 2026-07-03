@@ -21,16 +21,9 @@
 
 ## 示例扩展（可选）
 
-- 外部 API：踢人/封禁（示例模块 `builtin.kick-api`，接口：`POST /api/kick`，配置入口：面板左侧菜单「API 管理」）
 - 模块打包脚本：`powershell tools/package-module.ps1 -Project <csproj> -Manifest <manifest.json>`（产物默认输出到 `artifacts/modules/`）
-
-## 付费扩展模块（不免费开放）
-
-以下模块为扩展能力示例的“增强版/商业版”，默认不免费开放；如需获取请联系：TG `@SNINKBOT`。
-
-- 频道同步转发：按配置将来源频道/群组消息同步转发到目标（更适合多频道矩阵运营）
-- 监控频道更新通知：持续监控指定频道更新并向目标 ID 推送通知（支持通知冷却，避免刷屏）
-- 验证码 URL 登录：生成可外部访问的验证码获取页面，按需读取账号系统通知（777000）并展示验证码（接码/卖号场景常见用法）
+- 外部 API 示例：模块可通过 `IModuleApiProvider` 暴露 API 类型，并在 `MapEndpoints` 中注册自己的公开接口
+- 后台页面示例：新模块优先提供 `/api/panel/extensions/{module-slug}` 管理接口，由 Vue 后台承载页面；旧 Razor 页面走兼容入口
 
 ## 扩展点一览（任务 / API / UI）
 
@@ -252,12 +245,12 @@ modules/
   "schemaVersion": 1,
   "modules": [
     {
-      "id": "builtin.kick-api",
+      "id": "example.module",
       "enabled": true,
       "activeVersion": "1.2.3",
       "lastGoodVersion": "1.2.3",
       "installedVersions": ["1.2.3"],
-      "builtIn": true
+      "builtIn": false
     }
   ]
 }
@@ -333,16 +326,14 @@ powershell tools/package-module.ps1 -Project "src/YourModule/YourModule.csproj" 
 
 ```json
 {
-  "id": "example.kick-api",
-  "name": "示例：踢人 API",
+  "id": "example.echo-api",
+  "name": "示例：Echo API",
   "version": "1.0.0",
   "host": { "min": "1.0.0", "max": "2.0.0" },
-  "dependencies": [
-    { "id": "builtin.kick-api", "range": ">=1.0.0 <2.0.0" }
-  ],
+  "dependencies": [],
   "entry": {
-    "assembly": "Example.KickApi.dll",
-    "type": "Example.KickApi.ExampleKickApiModule"
+    "assembly": "Example.EchoApi.dll",
+    "type": "Example.EchoApi.ExampleEchoApiModule"
   }
 }
 ```
@@ -362,17 +353,17 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using TelegramPanel.Modules;
 
-namespace Example.KickApi;
+namespace Example.EchoApi;
 
-public sealed class ExampleKickApiModule : ITelegramPanelModule
+public sealed class ExampleEchoApiModule : ITelegramPanelModule
 {
     public ModuleManifest Manifest { get; } = new()
     {
-        Id = "example.kick-api",
-        Name = "示例：踢人 API",
+        Id = "example.echo-api",
+        Name = "示例：Echo API",
         Version = "1.0.0",
         Host = new HostCompatibility { Min = "1.0.0", Max = "2.0.0" },
-        Entry = new ModuleEntryPoint { Assembly = "Example.KickApi.dll", Type = typeof(ExampleKickApiModule).FullName! }
+        Entry = new ModuleEntryPoint { Assembly = "Example.EchoApi.dll", Type = typeof(ExampleEchoApiModule).FullName! }
     };
 
     public void ConfigureServices(IServiceCollection services, ModuleHostContext context)
@@ -748,11 +739,11 @@ public IEnumerable<ModuleTaskDefinition> GetTasks(ModuleHostContext context)
     yield return new ModuleTaskDefinition
     {
         Category = "bot",
-        TaskType = "bot_monitor_notify",
-        DisplayName = "监控频道更新通知",
+        TaskType = "example_background_monitor",
+        DisplayName = "示例后台监听",
         Description = "常驻后台监听，不占用批量任务队列；在配置里启用即可生效。",
         Icon = MudBlazor.Icons.Material.Filled.NotificationsActive,
-        CreateRoute = "/ext/pro.bot-monitor-notify/settings",
+        CreateRoute = "/ext/example.monitor/settings",
         Order = 100
     };
 }
@@ -983,7 +974,7 @@ public IEnumerable<ModuleApiTypeDefinition> GetApis(ModuleHostContext context)
 
 宿主会把 API 配置写入 `ExternalApi:Apis`（含 `Type` / `Enabled` / `ApiKey` / `Config(JSON object)`）。模块在 endpoint 里自行按 `X-API-Key` 匹配对应配置项并执行。
 
-> 内置 kick 接口提供了一个参考实现：`src/TelegramPanel.Web/ExternalApi/KickApi.cs`
+API 配置页只负责保存通用 `Config` JSON；具体字段、校验和执行逻辑由模块自己定义。
 
 ## UI 扩展（Vue 后台与旧页面兼容）
 

@@ -237,17 +237,6 @@ const canApplyVersionUpdate = computed(() =>
   && versionInfo.value.canApply,
 )
 
-const moduleIconFallbacks: Record<string, string> = {
-  'builtin.kick-api': 'person_remove',
-  'fragment-username-checker': 'timer',
-  'pro.bot-monitor-notify': 'notifications_active',
-  'pro.channel-member-gate': 'admin_panel_settings',
-  'pro.channel-push': 'campaign',
-  'pro.external-otp': 'vpn_key',
-  'pro.sync-forward': 'sync_alt',
-  'task.message-report': 'flag',
-}
-
 interface MenuItem {
   index: string
   label: string
@@ -305,79 +294,9 @@ const staticMenuItems: MenuItem[] = [
   { index: 'logout', label: '退出登录', icon: 'logout' },
 ]
 
-const fallbackModuleNavItems: ModuleNavItem[] = [
-  {
-    title: '踢人/封禁',
-    href: '/ext/builtin.kick-api/kick',
-    icon: moduleIconFallbacks['builtin.kick-api'],
-    group: '外部 API',
-    order: 10,
-    moduleId: 'builtin.kick-api',
-    pageKey: 'kick',
-  },
-  {
-    title: '监控频道更新通知',
-    href: '/ext/pro.bot-monitor-notify/settings',
-    icon: moduleIconFallbacks['pro.bot-monitor-notify'],
-    group: '用户模块',
-    order: 100,
-    moduleId: 'pro.bot-monitor-notify',
-    pageKey: 'settings',
-  },
-  {
-    title: '频道同步转发',
-    href: '/ext/pro.sync-forward/settings',
-    icon: moduleIconFallbacks['pro.sync-forward'],
-    group: '用户模块',
-    order: 120,
-    moduleId: 'pro.sync-forward',
-    pageKey: 'settings',
-  },
-  {
-    title: '频道成员准入与联动踢出',
-    href: '/ext/pro.channel-member-gate/settings',
-    icon: moduleIconFallbacks['pro.channel-member-gate'],
-    group: '用户模块',
-    order: 130,
-    moduleId: 'pro.channel-member-gate',
-    pageKey: 'settings',
-  },
-  {
-    title: '频道广告推送',
-    href: '/ext/pro.channel-push/settings',
-    icon: moduleIconFallbacks['pro.channel-push'],
-    group: '扩展模块',
-    order: 200,
-    moduleId: 'pro.channel-push',
-    pageKey: 'settings',
-  },
-  {
-    title: '协议号转API',
-    href: '/ext/pro.external-otp/protocol-api',
-    icon: moduleIconFallbacks['pro.external-otp'],
-    group: '协议号转API',
-    order: 110,
-    moduleId: 'pro.external-otp',
-    pageKey: 'protocol-api',
-  },
-  {
-    title: 'Fragment 用户名',
-    href: '/ext/fragment-username-checker/main',
-    icon: moduleIconFallbacks['fragment-username-checker'],
-    group: '工具',
-    order: 100,
-    moduleId: 'fragment-username-checker',
-    pageKey: 'main',
-  },
-]
-
 const menuItems = computed<MenuItem[]>(() => {
   const items = [...staticMenuItems]
   const mergedModuleItems = new Map<string, ModuleNavItem>()
-
-  for (const item of fallbackModuleNavItems) {
-    mergedModuleItems.set(normalizeModuleHref(item.href), item)
-  }
 
   for (const item of moduleNavItems.value) {
     const href = normalizeModuleHref(item.href)
@@ -466,7 +385,7 @@ function normalizeModuleHref(href: string) {
 }
 
 function resolveModuleIcon(item: ModuleNavItem) {
-  return (item.icon || '').trim() || moduleIconFallbacks[item.moduleId] || 'extension'
+  return (item.icon || '').trim() || 'extension'
 }
 
 async function loadModuleNav() {

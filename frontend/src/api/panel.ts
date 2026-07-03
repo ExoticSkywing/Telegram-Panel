@@ -53,33 +53,11 @@ import type {
   CloudMailSettings,
   LoggingSettings,
   SimpleCategory,
-  CreatedTasksResult,
-  CreateFragmentUsernameTaskRequest,
-  CreateKickTasksRequest,
-  FragmentChannelGroupOption,
   ModuleNavItem,
   SettingsPayload,
   SyncResult,
   SyncSettings,
-  SyncForwardCleanupResult,
-  SyncForwardPage,
-  SyncForwardRoute,
   TelegramStatusAutoRefreshSettings,
-  MonitorNotifyChatOption,
-  MonitorNotifyPage,
-  MonitorNotifySettings,
-  MemberGateBotChannel,
-  MemberGatePage,
-  MemberGateSettings,
-  ExternalOtpAccountPage,
-  ExternalOtpExportUrls,
-  ExternalOtpPage,
-  ChannelPushChannelSelector,
-  ChannelPushCreative,
-  ChannelPushLog,
-  ChannelPushPage,
-  ChannelPushSettings,
-  ChannelPushSlot,
   TaskCenter,
   TaskAssetUploadResult,
   TelegramAuthorization,
@@ -283,12 +261,6 @@ export const panelApi = {
   tasks: (count = 50) => api.get<TaskCenter>('/tasks', { params: { count } }).then((r) => r.data),
   task: (id: number) => api.get<BatchTask>(`/tasks/${id}`).then((r) => r.data),
   moduleNav: () => api.get<ModuleNavItem[]>('/module-nav').then((r) => r.data),
-  fragmentUsernameChannelGroups: () =>
-    api.get<FragmentChannelGroupOption[]>('/extensions/fragment-username/channel-groups').then((r) => r.data),
-  createFragmentUsernameTask: (payload: CreateFragmentUsernameTaskRequest) =>
-    api.post<BatchTask>('/extensions/fragment-username/tasks', payload).then((r) => r.data),
-  createKickTasks: (payload: CreateKickTasksRequest) =>
-    api.post<CreatedTasksResult>('/extensions/kick/tasks', payload, { timeout: 120_000 }).then((r) => r.data),
   createTask: (payload: CreateTaskRequest) =>
     api.post<BatchTask>('/tasks', payload).then((r) => r.data),
   updateTask: (id: number, payload: UpdateTaskRequest) =>
@@ -547,94 +519,4 @@ export const panelApi = {
     api.post<OperationResult>('/bot-channels/sync', { botId }, { timeout: 120_000 }).then((r) => r.data),
   exportBotChannelLink: (id: number, botId: number) =>
     api.post<LinkResult>(`/bot-channels/${id}/export-link`, {}, { params: { botId }, timeout: 120_000 }).then((r) => r.data),
-
-  syncForward: () =>
-    api.get<SyncForwardPage>('/extensions/sync-forward').then((r) => r.data),
-  saveSyncForwardSettings: (payload: { pollIntervalSeconds: number; fastSendIntervalMs: number }) =>
-    api.post<OperationResult>('/extensions/sync-forward/settings', payload).then((r) => r.data),
-  saveSyncForwardRoute: (route: SyncForwardRoute, clearStopped: boolean) =>
-    api.post<SyncForwardRoute>('/extensions/sync-forward/routes', { route, clearStopped }, { timeout: 120_000 }).then((r) => r.data),
-  enableSyncForwardRoute: (routeId: string) =>
-    api.post<OperationResult>(`/extensions/sync-forward/routes/${encodeURIComponent(routeId)}/enable`).then((r) => r.data),
-  disableSyncForwardRoute: (routeId: string) =>
-    api.post<OperationResult>(`/extensions/sync-forward/routes/${encodeURIComponent(routeId)}/disable`).then((r) => r.data),
-  resumeSyncForwardRoute: (routeId: string) =>
-    api.post<OperationResult>(`/extensions/sync-forward/routes/${encodeURIComponent(routeId)}/resume`).then((r) => r.data),
-  resetSyncForwardRouteProgress: (routeId: string, startMessageId: number) =>
-    api.post<OperationResult>(`/extensions/sync-forward/routes/${encodeURIComponent(routeId)}/reset-progress`, { startMessageId }).then((r) => r.data),
-  deleteSyncForwardRoute: (routeId: string) =>
-    api.delete<OperationResult>(`/extensions/sync-forward/routes/${encodeURIComponent(routeId)}`).then((r) => r.data),
-  cleanupSyncForwardTemp: (all: boolean) =>
-    api.post<SyncForwardCleanupResult>('/extensions/sync-forward/temp/cleanup', { all }).then((r) => r.data),
-
-  monitorNotify: () =>
-    api.get<MonitorNotifyPage>('/extensions/monitor-notify').then((r) => r.data),
-  saveMonitorNotifySettings: (settings: MonitorNotifySettings) =>
-    api.post<OperationResult>('/extensions/monitor-notify/settings', settings).then((r) => r.data),
-  monitorNotifySourceOptions: (taskId: string) =>
-    api.get<MonitorNotifyChatOption[]>('/extensions/monitor-notify/source-options', { params: { taskId } }).then((r) => r.data),
-  monitorNotifyTargetOptions: (taskId: string) =>
-    api.get<MonitorNotifyChatOption[]>('/extensions/monitor-notify/target-options', { params: { taskId } }).then((r) => r.data),
-
-  memberGate: () =>
-    api.get<MemberGatePage>('/extensions/member-gate').then((r) => r.data),
-  saveMemberGateSettings: (settings: MemberGateSettings) =>
-    api.post<OperationResult>('/extensions/member-gate/settings', settings).then((r) => r.data),
-  memberGateBotChannels: (botId: number) =>
-    api.get<MemberGateBotChannel[]>('/extensions/member-gate/bot-channels', { params: { botId } }).then((r) => r.data),
-
-  externalOtp: () =>
-    api.get<ExternalOtpPage>('/extensions/external-otp').then((r) => r.data),
-  externalOtpAccounts: (params: { categoryId: number; outFilter: 'all' | 'notOuted' | 'outed'; keyword?: string; page: number; pageSize: number }) =>
-    api.get<ExternalOtpAccountPage>('/extensions/external-otp/accounts', { params }).then((r) => r.data),
-  saveExternalOtpSoldCategory: (categoryId: number | null) =>
-    api.post<OperationResult>('/extensions/external-otp/sold-category', { categoryId }).then((r) => r.data),
-  saveExternalOtpAnnouncement: (html: string | null) =>
-    api.post<OperationResult>('/extensions/external-otp/announcement', { html }).then((r) => r.data),
-  refreshExternalOtpTokens: (accountIds: number[]) =>
-    api.post<OperationResult>('/extensions/external-otp/tokens/refresh', { accountIds }).then((r) => r.data),
-  setExternalOtpOutStatus: (accountIds: number[], isOuted: boolean) =>
-    api.post<OperationResult>('/extensions/external-otp/out-status', { accountIds, isOuted }).then((r) => r.data),
-  exportExternalOtpUrls: (accountIds: number[]) =>
-    api.post<ExternalOtpExportUrls>('/extensions/external-otp/urls/export', { accountIds }).then((r) => r.data),
-
-  channelPush: () =>
-    api.get<ChannelPushPage>('/extensions/channel-push').then((r) => r.data),
-  saveChannelPushGroup: (group: {
-    id?: string | null
-    name: string
-    botId: number
-    channelTelegramIds: number[]
-    description?: string | null
-  }) => api.post('/extensions/channel-push/groups', group).then((r) => r.data),
-  deleteChannelPushGroup: (id: string) =>
-    api.delete(`/extensions/channel-push/groups/${encodeURIComponent(id)}`).then((r) => r.data),
-  channelPushGroupChannels: (id: string) =>
-    api.get<ChannelPushChannelSelector>(`/extensions/channel-push/groups/${encodeURIComponent(id)}/channels`).then((r) => r.data),
-  saveChannelPushGroupChannels: (id: string, channelTelegramIds: number[]) =>
-    api.post(`/extensions/channel-push/groups/${encodeURIComponent(id)}/channels`, { channelTelegramIds }).then((r) => r.data),
-  saveChannelPushSlot: (slot: ChannelPushSlot) =>
-    api.post<ChannelPushSlot>('/extensions/channel-push/slots', slot).then((r) => r.data),
-  toggleChannelPushSlot: (id: string) =>
-    api.post<ChannelPushSlot>(`/extensions/channel-push/slots/${encodeURIComponent(id)}/toggle`).then((r) => r.data),
-  triggerChannelPushSlot: (id: string) =>
-    api.post(`/extensions/channel-push/slots/${encodeURIComponent(id)}/trigger`, {}, { timeout: 300_000 }).then((r) => r.data),
-  clearChannelPushSlotPlacements: (id: string) =>
-    api.post(`/extensions/channel-push/slots/${encodeURIComponent(id)}/clear-placements`, {}, { timeout: 300_000 }).then((r) => r.data),
-  deleteChannelPushSlot: (id: string) =>
-    api.delete(`/extensions/channel-push/slots/${encodeURIComponent(id)}`).then((r) => r.data),
-  fixChannelPushOrphanSlots: (targetGroupId: string) =>
-    api.post('/extensions/channel-push/slots/fix-orphans', { targetGroupId }).then((r) => r.data),
-  saveChannelPushCreative: (creative: ChannelPushCreative, buttonText?: string | null) =>
-    api.post<ChannelPushCreative>('/extensions/channel-push/creatives', { creative, buttonText }).then((r) => r.data),
-  bindChannelPushCreative: (id: string, slotId?: string | null) =>
-    api.post<ChannelPushCreative>(`/extensions/channel-push/creatives/${encodeURIComponent(id)}/bind`, { slotId }).then((r) => r.data),
-  deleteChannelPushCreative: (id: string) =>
-    api.delete(`/extensions/channel-push/creatives/${encodeURIComponent(id)}`).then((r) => r.data),
-  channelPushLogs: (params: { type?: string; status?: string }) =>
-    api.get<ChannelPushLog[]>('/extensions/channel-push/logs', { params }).then((r) => r.data),
-  clearChannelPushLogs: () =>
-    api.delete('/extensions/channel-push/logs').then((r) => r.data),
-  saveChannelPushSettings: (settings: ChannelPushSettings) =>
-    api.post<ChannelPushSettings>('/extensions/channel-push/settings', settings).then((r) => r.data),
 }

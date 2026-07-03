@@ -33,17 +33,6 @@ const routes: RouteRecordRaw[] = [
       { path: 'modules', component: () => import('@/views/Modules.vue'), meta: { title: '模块管理' } },
       { path: 'apis', component: () => import('@/views/ApiCenter.vue'), meta: { title: 'API 管理' } },
       { path: 'settings', component: () => import('@/views/Settings.vue'), meta: { title: '系统设置' } },
-      { path: 'ext/builtin.kick-api/kick', component: () => import('@/views/extensions/KickTask.vue'), meta: { title: '踢人/封禁' } },
-      { path: 'ext/pro.sync-forward/settings', component: () => import('@/views/extensions/SyncForward.vue'), meta: { title: '频道同步转发' } },
-      { path: 'ext/pro.bot-monitor-notify/settings', component: () => import('@/views/extensions/MonitorNotify.vue'), meta: { title: '监控频道更新通知' } },
-      { path: 'ext/pro.channel-member-gate/settings', component: () => import('@/views/extensions/MemberGate.vue'), meta: { title: '频道成员准入与联动踢出' } },
-      { path: 'ext/pro.external-otp/protocol-api', component: () => import('@/views/extensions/ExternalOtp.vue'), meta: { title: '协议号转API' } },
-      { path: 'ext/pro.channel-push/settings', component: () => import('@/views/extensions/ChannelPush.vue'), meta: { title: '频道广告推送' } },
-      {
-        path: 'ext/fragment-username-checker/main',
-        component: () => import('@/views/extensions/FragmentUsername.vue'),
-        meta: { title: 'Fragment 用户名监控' },
-      },
       {
         path: 'ext/:moduleId/:pageKey',
         component: () => import('@/views/extensions/GenericModulePage.vue'),

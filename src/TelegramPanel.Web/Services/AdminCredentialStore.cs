@@ -29,7 +29,8 @@ public sealed class AdminCredentialStore
 
     public bool MustChangePassword => _cached?.MustChangePassword == true;
 
-    public string CredentialsFilePath => Path.Combine(_environment.ContentRootPath, _options.CurrentValue.CredentialsPath);
+    public string CredentialsFilePath =>
+        StoragePathResolver.ResolveRelativeToBase(_options.CurrentValue.CredentialsPath, _environment.ContentRootPath);
 
     public async Task EnsureInitializedAsync(CancellationToken cancellationToken = default)
     {
@@ -133,6 +134,10 @@ public sealed class AdminCredentialStore
     private async Task SaveAsync(AdminCredentialFile file, CancellationToken cancellationToken)
     {
         var path = CredentialsFilePath;
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(dir))
+            Directory.CreateDirectory(dir);
+
         var json = JsonSerializer.Serialize(file, new JsonSerializerOptions { WriteIndented = true });
         await File.WriteAllTextAsync(path, json, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: false), cancellationToken);
     }

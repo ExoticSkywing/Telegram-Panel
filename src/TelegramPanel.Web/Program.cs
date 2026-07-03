@@ -255,8 +255,22 @@ static int ReadRetainedFileCountLimit(IConfiguration configuration)
     return v;
 }
 
+static string ResolveSerilogFilePath(IConfiguration configuration, IWebHostEnvironment environment)
+{
+    var configured = (configuration["Serilog:FilePath"] ?? "").Trim();
+    if (!string.IsNullOrWhiteSpace(configured))
+        return StoragePathResolver.ResolveRelativeToBase(configured, environment.ContentRootPath);
+
+    var persistentRoot = StoragePathResolver.ResolvePersistentRoot(configuration);
+    if (!string.IsNullOrWhiteSpace(persistentRoot))
+        return Path.Combine(persistentRoot, "logs", "telegram-panel-.log");
+
+    return Path.Combine("logs", "telegram-panel-.log");
+}
+
 var retainedFileCountLimit = ReadRetainedFileCountLimit(builder.Configuration);
 var serilogEnabled = builder.Configuration.GetValue("Serilog:Enabled", false);
+var serilogFilePath = ResolveSerilogFilePath(builder.Configuration, builder.Environment);
 
 var loggerConfig = new LoggerConfiguration()
     .Enrich.FromLogContext();
@@ -267,7 +281,7 @@ if (serilogEnabled)
         .ReadFrom.Configuration(builder.Configuration)
         // buffered=true：降低磁盘抖动/IO 阻塞导致的请求卡顿风险（尤其是低配 VPS/挂载卷/杀软扫描场景）
         .WriteTo.File(
-            "logs/telegram-panel-.log",
+            serilogFilePath,
             rollingInterval: RollingInterval.Day,
             retainedFileCountLimit: retainedFileCountLimit,
             buffered: true,
@@ -336,9 +350,13 @@ try
     var keysPath = configuredKeysPath;
     if (string.IsNullOrWhiteSpace(keysPath))
     {
-        keysPath = Directory.Exists("/data")
-            ? "/data/keys"
-            : Path.Combine(builder.Environment.ContentRootPath, "data-protection-keys");
+        keysPath = Path.Combine(
+            StoragePathResolver.ResolveWritableRoot(builder.Configuration, builder.Environment),
+            Directory.Exists("/data") ? "keys" : "data-protection-keys");
+    }
+    else
+    {
+        keysPath = StoragePathResolver.ResolveRelativeToBase(keysPath, builder.Environment.ContentRootPath);
     }
 
     Directory.CreateDirectory(keysPath);
@@ -378,7 +396,9 @@ try
         var dataSource = trimmed.Substring(dataSourcePrefix.Length).Trim().Trim('"');
         if (!Path.IsPathRooted(dataSource))
         {
-            var absolute = Path.Combine(builder.Environment.ContentRootPath, dataSource);
+            var absolute = Path.Combine(
+                StoragePathResolver.ResolveWritableRoot(builder.Configuration, builder.Environment),
+                dataSource);
             connectionString = $"{dataSourcePrefix}{absolute}";
         }
     }
@@ -762,9 +782,10 @@ if (Directory.Exists(spaRoot))
         }
     });
 }
-if (Directory.Exists("/data"))
+var persistentUploadsRoot = StoragePathResolver.ResolvePersistentRoot(app.Configuration);
+if (!string.IsNullOrWhiteSpace(persistentUploadsRoot))
 {
-    var uploadsRoot = "/data/uploads";
+    var uploadsRoot = Path.Combine(persistentUploadsRoot, "uploads");
     Directory.CreateDirectory(uploadsRoot);
     app.UseStaticFiles(new StaticFileOptions
     {
@@ -801,28 +822,15 @@ var redirectLegacyToVue = string.Equals(
     app.Configuration["PanelSpa:RedirectLegacy"] ?? "true",
     "true",
     StringComparison.OrdinalIgnoreCase);
-var vueManagedLegacyExtRoutes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-{
-    "/ext/builtin.kick-api/kick",
-    "/ext/fragment-username-checker/main",
-    "/ext/pro.sync-forward/settings",
-    "/ext/pro.bot-monitor-notify/settings",
-    "/ext/pro.channel-member-gate/settings",
-    "/ext/pro.channel-push/settings",
-    "/ext/pro.external-otp/protocol-api"
-};
 
-// 已复刻的后台页面默认交给 Vue；公开模块端点仍保留给模块自己处理。
-// 例如协议号转 API 的 /ext/otp/{token} 和 /ext/otp/api/wait 不能被重定向成后台 SPA。
+// 已复刻的后台页面默认交给 Vue；扩展模块页面由模块系统动态贡献，不在宿主硬编码。
+// 公开模块端点仍保留给模块自己处理，例如 /ext/otp/{token} 和 /ext/otp/api/wait。
 app.Use(async (context, next) =>
 {
     var requestPath = context.Request.Path.Value ?? string.Empty;
     var normalizedRequestPath = requestPath.Length > 1 ? requestPath.TrimEnd('/') : requestPath;
-    var legacyExtTarget = vueManagedLegacyExtRoutes.Contains(normalizedRequestPath)
-        ? "/ui" + normalizedRequestPath
-        : null;
     var hasLegacyTarget = legacyUiRedirects.TryGetValue(normalizedRequestPath, out var legacyTarget);
-    var vueTarget = legacyExtTarget ?? (hasLegacyTarget ? legacyTarget : null);
+    var vueTarget = hasLegacyTarget ? legacyTarget : null;
 
     if (redirectLegacyToVue
         && Directory.Exists(spaRoot)

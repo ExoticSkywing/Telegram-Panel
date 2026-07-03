@@ -19,8 +19,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.vars.outputs.tag }}
     steps:
       - name: Resolve tag name
         id: vars
@@ -33,15 +35,36 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+  build-linux:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
       - name: Checkout source at tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.vars.outputs.tag }}
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        shell: bash
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.20.0 --activate
+
+      - name: Build Vue admin
+        shell: bash
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend run build
 
       - name: Restore
         run: dotnet restore TelegramPanel.sln
@@ -65,11 +88,10 @@ jobs:
             -o artifacts/linux-arm64
 
       - name: Pack release assets
-        id: pack
         shell: bash
         run: |
           set -euo pipefail
-          TAG="${{ steps.vars.outputs.tag }}"
+          TAG="${{ needs.prepare.outputs.tag }}"
           mkdir -p dist
 
           X64_ZIP="telegram-panel-${TAG}-linux-x64.zip"
@@ -78,19 +100,84 @@ jobs:
           (cd artifacts/linux-x64 && zip -rq "../../dist/${X64_ZIP}" .)
           (cd artifacts/linux-arm64 && zip -rq "../../dist/${ARM64_ZIP}" .)
 
-          echo "x64=dist/${X64_ZIP}" >> "$GITHUB_OUTPUT"
-          echo "arm64=dist/${ARM64_ZIP}" >> "$GITHUB_OUTPUT"
+      - name: Upload Linux release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  build-windows:
+    needs: prepare
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source at tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Set up pnpm
+        shell: pwsh
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.20.0 --activate
+
+      - name: Build Vue admin
+        shell: pwsh
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend run build
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File tools\desktop\build-windows-installer.ps1
+
+      - name: Pack Windows release asset
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $tag = "${{ needs.prepare.outputs.tag }}"
+          Copy-Item -LiteralPath artifacts\desktop\TelegramPanel.Setup.exe -Destination "dist\telegram-panel-$tag-windows-x64-setup.exe" -Force
+
+      - name: Upload Windows release assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs:
+      - prepare
+      - build-linux
+      - build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: Create GitHub Release with auto changelog
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.vars.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
           generate_release_notes: true
           append_body: true
-          prerelease: ${{ contains(steps.vars.outputs.tag, '-') }}
+          prerelease: ${{ contains(needs.prepare.outputs.tag, '-') }}
           files: |
-            ${{ steps.pack.outputs.x64 }}
-            ${{ steps.pack.outputs.arm64 }}
+            dist/*
           body: |
             ## 本次版本主要更新
 
@@ -102,15 +189,19 @@ jobs:
             拉取对应 tag 的镜像：
 
             ```bash
-            docker pull ghcr.io/${{ github.repository }}:${{ steps.vars.outputs.tag }}
+            docker pull ghcr.io/${{ github.repository }}:${{ needs.prepare.outputs.tag }}
             ```
 
             ### 2. 面板内一键更新（Docker）
             路径：`左上角版本号 -> 版本信息弹窗 -> 一键更新并重启`
 
+            ### 3. Windows 桌面版
+            下载 `telegram-panel-${{ needs.prepare.outputs.tag }}-windows-x64-setup.exe` 安装包。
+
             ## 应用内更新资产
 
-            - `${{ steps.pack.outputs.x64 }}`
-            - `${{ steps.pack.outputs.arm64 }}`
+            - `telegram-panel-${{ needs.prepare.outputs.tag }}-linux-x64.zip`
+            - `telegram-panel-${{ needs.prepare.outputs.tag }}-linux-arm64.zip`
+            - `telegram-panel-${{ needs.prepare.outputs.tag }}-windows-x64-setup.exe`
 
             > 程序会自动匹配容器架构下载更新包，并部署到 `/data/app-current`。

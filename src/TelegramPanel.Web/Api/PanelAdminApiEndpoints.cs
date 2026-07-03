@@ -291,9 +291,6 @@ public static class PanelAdminApiEndpoints
         secured.MapGet("/external-apis/bots/{botId:int}/chats", GetExternalApiBotChatsAsync);
 
         secured.MapGet("/module-nav", GetModuleNavAsync);
-        secured.MapGet("/extensions/fragment-username/channel-groups", GetFragmentUsernameChannelGroupsAsync);
-        secured.MapPost("/extensions/fragment-username/tasks", CreateFragmentUsernameTaskAsync);
-        secured.MapPost("/extensions/kick/tasks", CreateKickTasksAsync);
     }
 
     private static async Task<IResult> LoginAsync(
@@ -4131,19 +4128,7 @@ public static class PanelAdminApiEndpoints
         if (!string.IsNullOrWhiteSpace(pageKey))
             raw = $"/ext/{moduleId}/{pageKey}";
 
-        return (moduleId, pageKey ?? string.Empty, raw) switch
-        {
-            ("builtin.kick-api", "kick", _) => "/ext/builtin.kick-api/kick",
-            ("fragment-username-checker", "main", _) => "/ext/fragment-username-checker/main",
-            ("pro.sync-forward", "settings", _) => "/ext/pro.sync-forward/settings",
-            ("pro.bot-monitor-notify", "settings", _) => "/ext/pro.bot-monitor-notify/settings",
-            ("pro.channel-member-gate", "settings", _) => "/ext/pro.channel-member-gate/settings",
-            ("pro.external-otp", "protocol-api", _) => "/ext/pro.external-otp/protocol-api",
-            ("pro.channel-push", "settings", _) => "/ext/pro.channel-push/settings",
-            ("fragment-username-checker", _, "/ext/fragment-username-checker/main") => "/ext/fragment-username-checker/main",
-            ("builtin.kick-api", _, "/ext/builtin.kick-api/kick") => "/ext/builtin.kick-api/kick",
-            _ => raw.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase) ? raw : null
-        };
+        return raw.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase) ? raw : null;
     }
 
     private static string NormalizeModuleHref(string? href)
@@ -4154,180 +4139,6 @@ public static class PanelAdminApiEndpoints
         if (value.Length > 0 && !value.StartsWith('/'))
             value = "/" + value;
         return value;
-    }
-
-    private static async Task<IResult> GetFragmentUsernameChannelGroupsAsync(
-        ChannelGroupManagementService groupManagement,
-        ChannelManagementService channelManagement,
-        CancellationToken cancellationToken)
-    {
-        var rows = new List<FragmentChannelGroupOptionDto>();
-        var groups = (await groupManagement.GetAllGroupsAsync())
-            .OrderBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        foreach (var group in groups)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var channels = await channelManagement.GetChannelsByGroupAsync(group.Id);
-            var privateCount = channels.Count(x =>
-                x.CreatorAccountId.HasValue
-                && x.CreatorAccountId.Value > 0
-                && string.IsNullOrWhiteSpace(x.Username));
-            rows.Add(new FragmentChannelGroupOptionDto(group.Id, group.Name, group.Description, privateCount));
-        }
-
-        return Results.Ok(rows);
-    }
-
-    private static async Task<IResult> CreateFragmentUsernameTaskAsync(
-        CreateFragmentUsernameTaskRequestDto request,
-        BatchTaskManagementService taskManagement)
-    {
-        var usernames = (request.Usernames ?? Array.Empty<string>())
-            .Select(x => (x ?? string.Empty).Trim().TrimStart('@').ToLowerInvariant())
-            .Where(x => Regex.IsMatch(x, "^[a-z][a-z0-9_]{4,31}$"))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        if (usernames.Count == 0)
-            return Results.BadRequest(new OperationResultDto(false, "请输入至少一个合法用户名"));
-
-        var groupIds = NormalizeIds(request.TargetGroupIds).ToList();
-        if (groupIds.Count == 0)
-            return Results.BadRequest(new OperationResultDto(false, "请至少选择一个频道分类"));
-
-        var config = new JsonObject
-        {
-            ["Usernames"] = JsonSerializer.SerializeToNode(usernames),
-            ["TargetGroupIds"] = JsonSerializer.SerializeToNode(groupIds),
-            ["CheckIntervalSeconds"] = Math.Clamp(request.CheckIntervalSeconds ?? 300, 60, 3600),
-            ["QueryDelayMs"] = Math.Clamp(request.QueryDelayMs ?? 1500, 0, 10000),
-            ["DurationHours"] = Math.Clamp(request.DurationHours ?? 0, 0, 720),
-            ["AssignedUsernames"] = new JsonArray(),
-            ["Canceled"] = false
-        };
-
-        var task = await taskManagement.CreateTaskAsync(new BatchTask
-        {
-            TaskType = "fragment_username_monitor",
-            Total = usernames.Count,
-            Completed = 0,
-            Failed = 0,
-            Config = config.ToJsonString(LocalConfigFile.CreateIndentedJsonSerializerOptions())
-        });
-
-        return Results.Ok(ToDto(task));
-    }
-
-    private static async Task<IResult> CreateKickTasksAsync(
-        CreateKickTasksRequestDto request,
-        BotManagementService botManagement,
-        BatchTaskManagementService taskManagement,
-        CancellationToken cancellationToken)
-    {
-        var userIds = (request.UserIds ?? Array.Empty<long>())
-            .Where(x => x > 0)
-            .Distinct()
-            .OrderBy(x => x)
-            .ToList();
-        if (userIds.Count == 0)
-            return Results.BadRequest(new OperationResultDto(false, "请输入至少一个用户 ID"));
-
-        var botId = Math.Max(0, request.BotId);
-        var useAllChats = botId == 0 || request.UseAllChats;
-        var configuredChatIds = (request.ChatIds ?? Array.Empty<long>())
-            .Where(x => x != 0)
-            .Distinct()
-            .ToHashSet();
-        var categoryIds = NormalizeIds(request.CategoryIds).ToHashSet();
-
-        var (totalChats, targetChatIds) = await ResolveKickTargetsAsync(
-            botManagement,
-            botId,
-            useAllChats,
-            configuredChatIds,
-            categoryIds,
-            request.IncludeUncategorized,
-            cancellationToken);
-        if (totalChats <= 0)
-            return Results.BadRequest(new OperationResultDto(false, "未匹配到任何可操作的频道/群组"));
-
-        var tasks = new List<BatchTaskDto>();
-        foreach (var userId in userIds)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var log = new KickTaskLog
-            {
-                ApiName = $"模块页面 (user={userId})",
-                BotId = botId,
-                UseAllChats = useAllChats,
-                ChatIds = useAllChats ? new List<long>() : targetChatIds,
-                UserId = userId,
-                PermanentBan = request.PermanentBan,
-                RequestedAtUtc = DateTime.UtcNow
-            };
-
-            var task = await taskManagement.CreateTaskAsync(new BatchTask
-            {
-                TaskType = BatchTaskTypes.ExternalApiKick,
-                Total = totalChats,
-                Completed = 0,
-                Failed = 0,
-                Config = JsonSerializer.Serialize(log, LocalConfigFile.CreateIndentedJsonSerializerOptions())
-            });
-            tasks.Add(ToDto(task));
-        }
-
-        return Results.Ok(new CreatedTasksResultDto(tasks));
-    }
-
-    private static async Task<(int Total, List<long> TargetChatIds)> ResolveKickTargetsAsync(
-        BotManagementService botManagement,
-        int botId,
-        bool useAllChats,
-        HashSet<long> configuredChatIds,
-        HashSet<int> categoryIds,
-        bool includeUncategorized,
-        CancellationToken cancellationToken)
-    {
-        var bots = (await botManagement.GetAllBotsAsync())
-            .Where(b => b.IsActive)
-            .OrderBy(b => b.Id)
-            .ToList();
-
-        if (botId > 0)
-            bots = bots.Where(b => b.Id == botId).ToList();
-
-        var total = 0;
-        foreach (var bot in bots)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var chats = (await botManagement.GetChatsAsync(bot.Id)).ToList();
-            if (!useAllChats)
-            {
-                chats = chats.Where(c =>
-                    configuredChatIds.Contains(c.TelegramId)
-                    || (c.CategoryId.HasValue && categoryIds.Contains(c.CategoryId.Value))
-                    || (!c.CategoryId.HasValue && includeUncategorized)).ToList();
-            }
-            total += chats.Count;
-        }
-
-        var targetChatIds = new List<long>();
-        if (!useAllChats)
-        {
-            targetChatIds = configuredChatIds
-                .Concat((await botManagement.GetChatsAsync(botId)).Where(c =>
-                    (c.CategoryId.HasValue && categoryIds.Contains(c.CategoryId.Value))
-                    || (!c.CategoryId.HasValue && includeUncategorized)).Select(c => c.TelegramId))
-                .Where(x => x != 0)
-                .Distinct()
-                .OrderBy(x => x)
-                .ToList();
-        }
-
-        return (total, targetChatIds);
     }
 
     private static AccountCategoryDto ToDto(AccountCategory category) =>
@@ -4587,12 +4398,8 @@ public static class PanelAdminApiEndpoints
             registered != null,
             api.Enabled,
             api.ApiKey,
-            api.Config ?? new JsonObject(),
-            api.Kick == null ? null : ToDto(api.Kick));
+            api.Config ?? new JsonObject());
     }
-
-    private static KickApiDto ToDto(KickApiDefinition kick) =>
-        new(kick.BotId, kick.UseAllChats, kick.ChatIds ?? new List<long>(), kick.PermanentBanDefault);
 
     private static BotOptionDto ToDto(Bot bot) =>
         new(bot.Id, bot.Name, bot.Username, bot.IsActive);
@@ -4768,27 +4575,6 @@ public static class PanelAdminApiEndpoints
             Config = request.Config ?? new JsonObject()
         };
 
-        if (request.Kick != null || string.Equals(api.Type, ExternalApiTypes.Kick, StringComparison.OrdinalIgnoreCase))
-        {
-            api.Kick = new KickApiDefinition
-            {
-                BotId = request.Kick?.BotId ?? 0,
-                UseAllChats = request.Kick?.UseAllChats ?? true,
-                ChatIds = request.Kick?.ChatIds?
-                    .Where(x => x != 0)
-                    .Distinct()
-                    .OrderBy(x => x)
-                    .ToList() ?? new List<long>(),
-                PermanentBanDefault = request.Kick?.PermanentBanDefault ?? false
-            };
-
-            if (api.Kick.BotId == 0)
-            {
-                api.Kick.UseAllChats = true;
-                api.Kick.ChatIds.Clear();
-            }
-        }
-
         return api;
     }
 
@@ -4879,22 +4665,6 @@ public static class PanelAdminApiEndpoints
         api.Type = (api.Type ?? string.Empty).Trim();
         api.ApiKey = (api.ApiKey ?? string.Empty).Trim();
         api.Config ??= new JsonObject();
-
-        if (string.Equals(api.Type, ExternalApiTypes.Kick, StringComparison.OrdinalIgnoreCase))
-        {
-            api.Kick ??= new KickApiDefinition();
-            api.Kick.ChatIds = api.Kick.ChatIds?
-                .Where(x => x != 0)
-                .Distinct()
-                .OrderBy(x => x)
-                .ToList() ?? new List<long>();
-
-            if (api.Kick.BotId == 0)
-            {
-                api.Kick.UseAllChats = true;
-                api.Kick.ChatIds.Clear();
-            }
-        }
     }
 
     private static string GenerateApiKey()
@@ -6120,30 +5890,6 @@ public sealed record ModuleNavItemDto(
     string ModuleId,
     string? PageKey);
 
-public sealed record FragmentChannelGroupOptionDto(
-    int Id,
-    string Name,
-    string? Description,
-    int PrivateChannelCount);
-
-public sealed record CreateFragmentUsernameTaskRequestDto(
-    IReadOnlyList<string>? Usernames,
-    IReadOnlyList<int>? TargetGroupIds,
-    int? CheckIntervalSeconds,
-    int? QueryDelayMs,
-    int? DurationHours);
-
-public sealed record CreateKickTasksRequestDto(
-    int BotId,
-    bool UseAllChats,
-    IReadOnlyList<int>? CategoryIds,
-    bool IncludeUncategorized,
-    IReadOnlyList<long>? ChatIds,
-    IReadOnlyList<long>? UserIds,
-    bool PermanentBan);
-
-public sealed record CreatedTasksResultDto(IReadOnlyList<BatchTaskDto> Tasks);
-
 public sealed record DataDictionaryDto(
     int Id,
     string Name,
@@ -6209,8 +5955,7 @@ public sealed record ExternalApiDefinitionDto(
     bool TypeAvailable,
     bool Enabled,
     string ApiKey,
-    JsonObject Config,
-    KickApiDto? Kick);
+    JsonObject Config);
 
 public sealed record ExternalApiTypeDto(
     string Type,
@@ -6280,14 +6025,7 @@ public sealed record SaveExternalApiRequestDto(
     string? Type,
     bool Enabled,
     string? ApiKey,
-    JsonObject? Config,
-    KickApiDto? Kick);
-
-public sealed record KickApiDto(
-    int BotId,
-    bool UseAllChats,
-    IReadOnlyList<long> ChatIds,
-    bool PermanentBanDefault);
+    JsonObject? Config);
 
 public sealed record BotOptionDto(
     int Id,

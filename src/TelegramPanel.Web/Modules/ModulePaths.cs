@@ -1,5 +1,6 @@
 using System.Reflection;
 using TelegramPanel.Modules;
+using TelegramPanel.Web.Services;
 
 namespace TelegramPanel.Web.Modules;
 
@@ -25,12 +26,11 @@ public static class ModulePaths
     {
         var configured = (configuration["Modules:RootPath"] ?? "").Trim();
         if (!string.IsNullOrWhiteSpace(configured))
-        {
-            if (Path.IsPathRooted(configured))
-                return configured;
+            return StoragePathResolver.ResolveRelativeToBase(configured, environment.ContentRootPath);
 
-            return Path.Combine(environment.ContentRootPath, configured);
-        }
+        var persistentRoot = StoragePathResolver.ResolvePersistentRoot(configuration);
+        if (!string.IsNullOrWhiteSpace(persistentRoot))
+            return Path.Combine(persistentRoot, "modules");
 
         // Docker 默认把持久化目录挂到 /data
         if (Directory.Exists("/data"))

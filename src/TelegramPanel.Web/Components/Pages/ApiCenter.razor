@@ -7,6 +7,7 @@
 @inject IWebHostEnvironment Environment
 @using System.Text.Json
 @using System.Text.Json.Nodes
+@using System.Security.Cryptography
 @using TelegramPanel.Modules
 @using TelegramPanel.Web.ExternalApi
 @using TelegramPanel.Web.Modules
@@ -113,12 +114,6 @@
             a.Type = (a.Type ?? "").Trim();
             a.ApiKey = (a.ApiKey ?? "").Trim();
             a.Config ??= new JsonObject();
-
-            if (string.Equals(a.Type, ExternalApiTypes.Kick, StringComparison.OrdinalIgnoreCase))
-            {
-                a.Kick ??= new KickApiDefinition();
-                a.Kick.ChatIds ??= new List<long>();
-            }
         }
 
         return list
@@ -150,31 +145,17 @@
             return;
         }
 
-        var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Small, FullWidth = true };
-        var dialog = DialogService.Show<TelegramPanel.Web.Components.Dialogs.CreateExternalApiDialog>(
-            "新建 API",
-            new DialogParameters { ["AvailableTypes"] = availableTypes },
-            options)!;
-        var result = await dialog.Result;
-        if (result is null || result.Canceled || result.Data is not ExternalApiDefinition def)
-            return;
-
-        def.Id = string.IsNullOrWhiteSpace(def.Id) ? Guid.NewGuid().ToString("N") : def.Id.Trim();
-        def.Name = (def.Name ?? "").Trim();
-        def.Type = (def.Type ?? "").Trim();
-        def.ApiKey = (def.ApiKey ?? "").Trim();
-
-        if (apis.Any(a => string.Equals(a.ApiKey, def.ApiKey, StringComparison.Ordinal)))
+        var type = availableTypes[0];
+        var def = new ExternalApiDefinition
         {
-            Snackbar.Add("X-API-Key 已存在，请重新生成后再创建", Severity.Warning);
-            return;
-        }
+            Id = Guid.NewGuid().ToString("N"),
+            Name = type.DisplayName,
+            Type = type.Type,
+            Enabled = false,
+            ApiKey = GenerateApiKey(),
+            Config = new JsonObject()
+        };
 
-        apis.Add(def);
-        await SaveToLocalConfigAsync(apis);
-        await Reload();
-
-        // 创建后直接进入编辑（便于选 Bot / chats）
         await EditApi(def);
     }
 
@@ -185,50 +166,26 @@
             Snackbar.Add("该 API 类型对应模块已停用：当前配置不会生效（重启后仍不会提供接口）。", Severity.Warning);
         }
 
-        if (string.Equals(api.Type, ExternalApiTypes.Kick, StringComparison.OrdinalIgnoreCase))
+        var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Large, FullWidth = true };
+        var parameters = new DialogParameters
         {
-            var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Large, FullWidth = true };
-            var parameters = new DialogParameters { ["Api"] = api };
-            var dialog = DialogService.Show<TelegramPanel.Web.Components.Dialogs.EditKickApiDialog>("编辑 API：踢人/封禁", parameters, options)!;
-            var result = await dialog.Result;
-            if (result is null || result.Canceled || result.Data is not ExternalApiDefinition updated)
-                return;
+            ["Api"] = api,
+            ["Route"] = GetRoute(api.Type)
+        };
+        var dialog = DialogService.Show<TelegramPanel.Web.Components.Dialogs.EditGenericApiDialog>("编辑 API", parameters, options)!;
+        var result = await dialog.Result;
+        if (result is null || result.Canceled || result.Data is not ExternalApiDefinition updated)
+            return;
 
-            // Key 必须唯一
-            if (apis.Any(a => a.Id != api.Id && string.Equals(a.ApiKey, updated.ApiKey, StringComparison.Ordinal)))
-            {
-                Snackbar.Add("X-API-Key 已存在，请更换后保存", Severity.Warning);
-                return;
-            }
-
-            ReplaceInList(updated);
-            await SaveToLocalConfigAsync(apis);
-            await Reload();
+        if (apis.Any(a => a.Id != api.Id && string.Equals(a.ApiKey, updated.ApiKey, StringComparison.Ordinal)))
+        {
+            Snackbar.Add("X-API-Key 已存在，请更换后保存", Severity.Warning);
             return;
         }
 
-        {
-            var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Large, FullWidth = true };
-            var parameters = new DialogParameters
-            {
-                ["Api"] = api,
-                ["Route"] = GetRoute(api.Type)
-            };
-            var dialog = DialogService.Show<TelegramPanel.Web.Components.Dialogs.EditGenericApiDialog>("编辑 API", parameters, options)!;
-            var result = await dialog.Result;
-            if (result is null || result.Canceled || result.Data is not ExternalApiDefinition updated)
-                return;
-
-            if (apis.Any(a => a.Id != api.Id && string.Equals(a.ApiKey, updated.ApiKey, StringComparison.Ordinal)))
-            {
-                Snackbar.Add("X-API-Key 已存在，请更换后保存", Severity.Warning);
-                return;
-            }
-
-            ReplaceInList(updated);
-            await SaveToLocalConfigAsync(apis);
-            await Reload();
-        }
+        ReplaceInList(updated);
+        await SaveToLocalConfigAsync(apis);
+        await Reload();
     }
 
     private async Task DeleteApi(ExternalApiDefinition api)
@@ -274,11 +231,7 @@
 
         var url = Navigation.ToAbsoluteUri(route).ToString();
 
-        var body = string.Equals(api.Type, ExternalApiTypes.Kick, StringComparison.OrdinalIgnoreCase)
-            ? "{\\\"user_id\\\": 123456789}"
-            : "{}";
-
-        var curl = $"curl -X POST \"{url}\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-API-Key: {key}\" \\\n  -d '{body}'";
+        var curl = $"curl -X POST \"{url}\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-API-Key: {key}\" \\\n  -d '{{}}'";
 
         var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Medium, FullWidth = true };
         var parameters = new DialogParameters
@@ -346,5 +299,14 @@
         var created = new JsonObject();
         root[key] = created;
         return created;
+    }
+
+    private static string GenerateApiKey()
+    {
+        var bytes = RandomNumberGenerator.GetBytes(32);
+        return Convert.ToBase64String(bytes)
+            .Replace('+', '-')
+            .Replace('/', '_')
+            .TrimEnd('=');
     }
 }

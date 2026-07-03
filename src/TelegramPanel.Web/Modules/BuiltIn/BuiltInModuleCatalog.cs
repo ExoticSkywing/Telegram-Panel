@@ -11,7 +11,6 @@ public sealed class BuiltInModuleCatalog
     {
         _modules = new List<ITelegramPanelModule>
         {
-            new KickApiModule(hostVersion),
             new TaskCatalogModule(hostVersion),
         };
 

@@ -704,10 +704,6 @@ function resolveCreateTarget(definition?: TaskDefinition) {
   const route = normalizeVueRoute(definition?.createRoute || '')
 
   if (route) return route
-  if (taskType === 'fragment_username_monitor') return '/ext/fragment-username-checker/main'
-  if (taskType === 'user_sync_forward' || taskType === 'bot_sync_forward') return '/ext/pro.sync-forward/settings'
-  if (taskType === 'bot_monitor_notify') return '/ext/pro.bot-monitor-notify/settings'
-  if (taskType === 'bot_channel_member_gate') return '/ext/pro.channel-member-gate/settings'
   return ''
 }
 

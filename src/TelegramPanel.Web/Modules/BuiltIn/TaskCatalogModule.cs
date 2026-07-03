@@ -145,14 +145,5 @@ public sealed class TaskCatalogModule : ITelegramPanelModule, IModuleTaskProvide
             Order = 220
         };
 
-        yield return new ModuleTaskDefinition
-        {
-            Category = "system",
-            TaskType = BatchTaskTypes.ExternalApiKick,
-            DisplayName = "外部 API：踢人/封禁",
-            Description = "由外部接口触发并记录到任务中心（一般无需手动创建）。",
-            Icon = Icons.Material.Filled.Link,
-            Order = 1000
-        };
     }
 }

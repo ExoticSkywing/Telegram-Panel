@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Components.Forms;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using TelegramPanel.Core.Services.Telegram;
 
@@ -21,11 +22,16 @@ public sealed record StoredImageAssetInfo(string AssetPath, string FileName)
 /// </summary>
 public sealed class ImageAssetStorageService
 {
+    private readonly IConfiguration _configuration;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<ImageAssetStorageService> _logger;
 
-    public ImageAssetStorageService(IWebHostEnvironment environment, ILogger<ImageAssetStorageService> logger)
+    public ImageAssetStorageService(
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        ILogger<ImageAssetStorageService> logger)
     {
+        _configuration = configuration;
         _environment = environment;
         _logger = logger;
     }
@@ -134,10 +140,11 @@ public sealed class ImageAssetStorageService
 
     private string GetStorageRootPath()
     {
-        if (Directory.Exists("/data"))
+        var persistentRoot = StoragePathResolver.ResolvePersistentRoot(_configuration);
+        if (!string.IsNullOrWhiteSpace(persistentRoot))
         {
-            Directory.CreateDirectory("/data/uploads");
-            return "/data";
+            Directory.CreateDirectory(Path.Combine(persistentRoot, "uploads"));
+            return persistentRoot;
         }
 
         var path = _environment.WebRootPath;
