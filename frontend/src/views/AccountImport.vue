@@ -14,13 +14,13 @@
       </div>
     </el-alert>
 
-    <el-card shadow="never" class="page-card">
+    <el-card shadow="never" class="page-card import-card import-card-primary">
       <template #header>
         <div class="card-header">
           <span>压缩包导入（推荐）</span>
         </div>
       </template>
-      <el-alert type="info" :closable="false" show-icon>
+      <el-alert type="info" :closable="false" show-icon class="import-tip-alert">
         <template #title>
           <div>支持导入账号 Zip（推荐）：</div>
           <ul class="import-tips">
@@ -71,7 +71,7 @@
     </el-card>
 
     <div class="import-grid mt-4">
-      <el-card shadow="never" class="page-card">
+      <el-card shadow="never" class="page-card import-card">
         <template #header>
           <div class="card-header">
             <span>Session 文件导入</span>
@@ -102,7 +102,7 @@
         </el-button>
       </el-card>
 
-      <el-card shadow="never" class="page-card">
+      <el-card shadow="never" class="page-card import-card">
         <template #header>
           <div class="card-header">
             <span>StringSession 导入</span>
@@ -1068,10 +1068,31 @@ onMounted(() => {
   min-width: 0;
 }
 
+.import-card {
+  height: 100%;
+}
+
+.import-card :deep(.el-card__body) {
+  display: flex;
+  flex-direction: column;
+}
+
+.import-card-primary {
+  width: min(100%, 1160px);
+}
+
+.import-tip-alert :deep(.el-alert__content) {
+  width: 100%;
+}
+
 .import-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
+  width: min(100%, 1160px);
+  margin-left: auto;
+  margin-right: auto;
+  align-items: stretch;
 }
 
 .tree-example {
@@ -1107,6 +1128,7 @@ onMounted(() => {
   overflow: auto;
   border: 1px solid var(--tp-border);
   border-radius: 4px;
+  flex: 1;
 }
 
 .account-category-tag {

@@ -77,7 +77,7 @@ public class AccountManagementService
         return await _accountRepository.CountAsync();
     }
 
-    public async Task<(int Total, int Active, int Limited, int Banned)> CountDashboardAsync(CancellationToken cancellationToken = default)
+    public async Task<(int Total, int Normal, int Limited, int Invalid)> CountDashboardAsync(CancellationToken cancellationToken = default)
     {
         return await _accountRepository.CountDashboardAsync(cancellationToken);
     }

@@ -515,9 +515,9 @@ export interface DashboardSummary {
   activeTaskCount: number
   enabledScheduledTaskCount: number
   dictionaryCount: number
-  onlineAccountCount: number
+  normalAccountCount: number
   limitedAccountCount: number
-  bannedAccountCount: number
+  invalidAccountCount: number
   activeTasks: BatchTask[]
   recentTasks: BatchTask[]
 }

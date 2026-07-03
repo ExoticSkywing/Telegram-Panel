@@ -34,7 +34,7 @@
           <div class="status-list">
             <div class="status-row">
               <span class="status-dot ok" />
-              <span>在线账号: {{ summary?.onlineAccountCount ?? '-' }}</span>
+              <span>正常账号: {{ summary?.normalAccountCount ?? '-' }}</span>
             </div>
             <div class="status-row">
               <span class="status-dot warn" />
@@ -42,7 +42,7 @@
             </div>
             <div class="status-row">
               <span class="status-dot danger" />
-              <span>封禁账号: {{ summary?.bannedAccountCount ?? '-' }}</span>
+              <span>失效账号: {{ summary?.invalidAccountCount ?? '-' }}</span>
             </div>
           </div>
         </el-card>
@@ -99,10 +99,10 @@ let timer: number | undefined
 let loadPromise: Promise<void> | null = null
 
 const stats = computed(() => [
-  { label: '账号总数', value: summary.value?.accountCount ?? '-', icon: 'account_circle', iconClass: 'primary' },
+  { label: '正常账号', value: summary.value?.normalAccountCount ?? '-', icon: 'verified_user', iconClass: 'primary' },
+  { label: '受限账号', value: summary.value?.limitedAccountCount ?? '-', icon: 'warning', iconClass: 'warning' },
+  { label: '失效账号', value: summary.value?.invalidAccountCount ?? '-', icon: 'person_off', iconClass: 'danger' },
   { label: '频道总数', value: summary.value?.channelCount ?? '-', icon: 'campaign', iconClass: 'secondary' },
-  { label: '群组总数', value: summary.value?.groupCount ?? '-', icon: 'group', iconClass: 'tertiary' },
-  { label: '活跃任务', value: summary.value?.activeTaskCount ?? '-', icon: 'playlist_add_check', iconClass: 'success' },
 ])
 
 const recentTaskRows = computed(() =>
@@ -211,12 +211,12 @@ onUnmounted(() => {
   color: #00bcd4;
 }
 
-.stat-icon.tertiary {
-  color: #26a69a;
+.stat-icon.warning {
+  color: #e6a23c;
 }
 
-.stat-icon.success {
-  color: #00c853;
+.stat-icon.danger {
+  color: #f56c6c;
 }
 
 .dashboard-panel {

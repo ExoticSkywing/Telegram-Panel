@@ -1,8 +1,8 @@
 <template>
   <div>
-    <el-card shadow="never" class="page-card bot-form">
+    <el-card shadow="never" class="page-card bot-panel bot-form">
       <template #header><span>新增机器人</span></template>
-      <el-form label-width="88px">
+      <el-form label-width="88px" class="bot-create-form">
         <el-form-item label="名称"><el-input v-model="createForm.name" /></el-form-item>
         <el-form-item label="Bot Token"><el-input v-model="createForm.token" show-password /></el-form-item>
         <el-form-item label="用户名"><el-input v-model="createForm.username" placeholder="bot_username" /></el-form-item>
@@ -10,7 +10,7 @@
       </el-form>
     </el-card>
 
-    <el-card shadow="never" class="page-card mt-4">
+    <el-card shadow="never" class="page-card bot-panel mt-4">
       <div class="toolbar mb-3">
         <div class="toolbar-title">机器人 ({{ rows.length }})</div>
         <div class="toolbar-spacer" />
@@ -151,6 +151,15 @@ onMounted(load)
 <style scoped>
 .bot-form {
   max-width: 680px;
+}
+
+.bot-panel {
+  width: min(100%, 1160px);
+}
+
+.bot-create-form {
+  max-width: 560px;
+  margin: 0 auto;
 }
 
 .toolbar-title {

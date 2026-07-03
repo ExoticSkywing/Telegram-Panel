@@ -164,7 +164,7 @@ public class AccountRepository : Repository<Account>, IAccountRepository
             .CountAsync(a => a.IsActive && (a.Category == null || !a.Category.ExcludeFromOperations), cancellationToken);
     }
 
-    public async Task<(int Total, int Active, int Limited, int Banned)> CountDashboardAsync(CancellationToken cancellationToken = default)
+    public async Task<(int Total, int Normal, int Limited, int Invalid)> CountDashboardAsync(CancellationToken cancellationToken = default)
     {
         var counts = await _dbSet
             .AsNoTracking()
@@ -172,7 +172,41 @@ public class AccountRepository : Repository<Account>, IAccountRepository
             .Select(g => new
             {
                 Total = g.Count(),
-                Active = g.Count(a => a.IsActive && (a.Category == null || !a.Category.ExcludeFromOperations)),
+                Normal = g.Count(a =>
+                    a.IsActive
+                    && (a.Category == null || !a.Category.ExcludeFromOperations)
+                    && (
+                        a.TelegramStatusOk == true
+                        || a.TelegramStatusSummary == null
+                        || a.TelegramStatusSummary == ""
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%正常%")
+                    )
+                    && (
+                        a.TelegramStatusSummary == null
+                        || a.TelegramStatusSummary == ""
+                        || !(
+                            EF.Functions.Like(a.TelegramStatusSummary!, "%受限%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%冻结%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Restricted%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%FROZEN_METHOD_INVALID%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%PEER_FLOOD%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%FLOOD_WAIT%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%创建频道接口被冻结%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%封禁%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%注销%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%停用%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%USER_DEACTIVATED%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%PHONE_NUMBER_BANNED%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 失效%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_UNREGISTERED%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 冲突%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_DUPLICATED%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 已被撤销%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%SESSION_REVOKED%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 无法读取%")
+                            || EF.Functions.Like(a.TelegramStatusSummary!, "%Can't read session block%")
+                        )
+                    )),
                 Limited = g.Count(a =>
                     a.TelegramStatusSummary != null
                     && a.TelegramStatusSummary != ""
@@ -181,9 +215,11 @@ public class AccountRepository : Repository<Account>, IAccountRepository
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%冻结%")
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%Restricted%")
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%FROZEN_METHOD_INVALID%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%PEER_FLOOD%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%FLOOD_WAIT%")
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%创建频道接口被冻结%")
                     )),
-                Banned = g.Count(a =>
+                Invalid = g.Count(a =>
                     a.TelegramStatusSummary != null
                     && a.TelegramStatusSummary != ""
                     && (
@@ -192,13 +228,21 @@ public class AccountRepository : Repository<Account>, IAccountRepository
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%停用%")
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%USER_DEACTIVATED%")
                         || EF.Functions.Like(a.TelegramStatusSummary!, "%PHONE_NUMBER_BANNED%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 失效%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_UNREGISTERED%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 冲突%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_DUPLICATED%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 已被撤销%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%SESSION_REVOKED%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 无法读取%")
+                        || EF.Functions.Like(a.TelegramStatusSummary!, "%Can't read session block%")
                     ))
             })
             .FirstOrDefaultAsync(cancellationToken);
 
         return counts == null
             ? (0, 0, 0, 0)
-            : (counts.Total, counts.Active, counts.Limited, counts.Banned);
+            : (counts.Total, counts.Normal, counts.Limited, counts.Invalid);
     }
 
     public async Task<(int Limited, int Banned)> CountTelegramStatusBucketsAsync(CancellationToken cancellationToken = default)
@@ -212,6 +256,8 @@ public class AccountRepository : Repository<Account>, IAccountRepository
             || EF.Functions.Like(a.TelegramStatusSummary!, "%冻结%")
             || EF.Functions.Like(a.TelegramStatusSummary!, "%Restricted%")
             || EF.Functions.Like(a.TelegramStatusSummary!, "%FROZEN_METHOD_INVALID%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%PEER_FLOOD%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%FLOOD_WAIT%")
             || EF.Functions.Like(a.TelegramStatusSummary!, "%创建频道接口被冻结%"), cancellationToken);
 
         var banned = await summaries.CountAsync(a =>
@@ -219,7 +265,15 @@ public class AccountRepository : Repository<Account>, IAccountRepository
             || EF.Functions.Like(a.TelegramStatusSummary!, "%注销%")
             || EF.Functions.Like(a.TelegramStatusSummary!, "%停用%")
             || EF.Functions.Like(a.TelegramStatusSummary!, "%USER_DEACTIVATED%")
-            || EF.Functions.Like(a.TelegramStatusSummary!, "%PHONE_NUMBER_BANNED%"), cancellationToken);
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%PHONE_NUMBER_BANNED%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 失效%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_UNREGISTERED%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 冲突%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%AUTH_KEY_DUPLICATED%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 已被撤销%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%SESSION_REVOKED%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%Session 无法读取%")
+            || EF.Functions.Like(a.TelegramStatusSummary!, "%Can't read session block%"), cancellationToken);
 
         return (limited, banned);
     }

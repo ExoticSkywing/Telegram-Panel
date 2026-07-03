@@ -345,9 +345,9 @@ public static class PanelAdminApiEndpoints
             activeTaskCount,
             enabledScheduledTaskCount,
             dictionaryCount,
-            accountCounts.Active,
+            accountCounts.Normal,
             accountCounts.Limited,
-            accountCounts.Banned,
+            accountCounts.Invalid,
             activeTaskItems.Take(20).Select(ToTaskListDto).ToList(),
             recentTasks.Select(ToTaskListDto).ToList()));
     }
@@ -5731,9 +5731,9 @@ public sealed record DashboardSummaryDto(
     int ActiveTaskCount,
     int EnabledScheduledTaskCount,
     int DictionaryCount,
-    int OnlineAccountCount,
+    int NormalAccountCount,
     int LimitedAccountCount,
-    int BannedAccountCount,
+    int InvalidAccountCount,
     IReadOnlyList<BatchTaskDto> ActiveTasks,
     IReadOnlyList<BatchTaskDto> RecentTasks);
 

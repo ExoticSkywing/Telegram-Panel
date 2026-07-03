@@ -26,17 +26,24 @@ const iconName = computed(() => normalizeMaterialIconName(rawIcon.value) || 'ext
 function extractSvgPaths(value: string) {
   if (!value.includes('<')) {
     const path = value.trim()
-    return path && /^[Mm][MmZzLlHhVvCcSsQqTtAa0-9,.\-\s]+$/.test(path) ? [path] : []
+    return isRenderableSvgPath(path) ? [path] : []
   }
 
   const paths: string[] = []
-  const pattern = /\sd=(["'])(.*?)\1/gi
+  const pattern = /<path\b([^>]*)\sd=(["'])(.*?)\2([^>]*)>/gi
   let match: RegExpExecArray | null
   while ((match = pattern.exec(value)) !== null) {
-    const path = match[2].trim()
-    if (path && /^[MmZzLlHhVvCcSsQqTtAa0-9,.\-\s]+$/.test(path)) paths.push(path)
+    const attrs = `${match[1]} ${match[4]}`
+    const path = match[3].trim()
+    if (!/fill=(["'])none\1/i.test(attrs) && isRenderableSvgPath(path)) paths.push(path)
   }
   return paths
+}
+
+function isRenderableSvgPath(path: string) {
+  if (!path || !/^[Mm][MmZzLlHhVvCcSsQqTtAa0-9,.\-\s]+$/.test(path)) return false
+  const compact = path.replace(/[\s,]/g, '').toLowerCase()
+  return !['m0024v24h0z', 'm0h24v24h0z', 'm000h24v24h0z'].includes(compact)
 }
 
 function normalizeMaterialIconName(value: string) {

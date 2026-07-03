@@ -11,7 +11,7 @@ public interface IAccountRepository : IRepository<Account>
     Task<Account?> GetByUserIdAsync(long userId);
     Task<IEnumerable<Account>> GetByCategoryAsync(int categoryId);
     Task<IEnumerable<Account>> GetActiveAccountsAsync();
-    Task<(int Total, int Active, int Limited, int Banned)> CountDashboardAsync(CancellationToken cancellationToken = default);
+    Task<(int Total, int Normal, int Limited, int Invalid)> CountDashboardAsync(CancellationToken cancellationToken = default);
     Task<int> CountActiveOperationAccountsAsync(CancellationToken cancellationToken = default);
     Task<(int Limited, int Banned)> CountTelegramStatusBucketsAsync(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<Account>> GetTransientFailedStatusAccountsAsync(
