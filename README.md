@@ -4,6 +4,11 @@
 
 A **WTelegramClient**-based multi-account Telegram management panel built with a **.NET 8** backend and a **Vue 3** management UI.
 
+<p align="center">
+  <a href="https://t.me/zhanzhangck"><img src="https://img.shields.io/badge/Telegram-站长仓库-blue?logo=telegram" alt="Telegram 站长仓库"></a>
+  <a href="https://t.me/vpsbbq"><img src="https://img.shields.io/badge/Telegram-NexHub_AI社区-blue?logo=telegram" alt="Telegram NexHub AI社区"></a>
+</p>
+
 ## Introduction
 
 Telegram Panel is a unified web panel for managing and operating multiple Telegram accounts, focusing on account lifecycle management, batch operations, channel/group management, automated tasks, and module extension capabilities.

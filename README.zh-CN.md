@@ -12,11 +12,13 @@
 </p>
 
 <p align="center">
+  <a href="https://t.me/zhanzhangck"><img src="https://img.shields.io/badge/Telegram-站长仓库-blue?logo=telegram" alt="Telegram 站长仓库"></a>
+  <a href="https://t.me/vpsbbq"><img src="https://img.shields.io/badge/Telegram-NexHub_AI社区-blue?logo=telegram" alt="Telegram NexHub AI社区"></a>
+</p>
+
+<p align="center">
   📚 <b><a href="https://moeacgx.github.io/Telegram-Panel/">文档站</a></b> |
-  🏪 <b><a href="https://faka.boxmoe.eu.org/">API 账号购买</a></b> |
-  🖼️ <b><a href="screenshot/">截图</a></b> |
-  💬 <b><a href="https://t.me/zhanzhangck">TG 频道</a></b> |
-  👥 <b><a href="https://t.me/vpsbbq">站长交流群</a></b>
+  🖼️ <b><a href="screenshot/">截图</a></b>
 </p>
 
 ## 项目简介
