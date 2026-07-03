@@ -120,7 +120,7 @@
         <el-table-column v-if="isColumnVisible('telegramStatus')" label="Telegram 状态" min-width="180">
           <template #default="{ row }">
             <el-tooltip v-if="row.telegramStatusSummary" :content="buildStatusTitle(row)" placement="top">
-              <el-tag :type="row.telegramStatusOk ? 'success' : 'danger'" size="small">{{ row.telegramStatusSummary }}</el-tag>
+              <el-tag :type="row.telegramStatusOk ? 'success' : 'danger'" size="small">{{ telegramStatusText(row) }}</el-tag>
             </el-tooltip>
             <el-tag v-else type="info" size="small">未检测</el-tag>
           </template>
@@ -825,6 +825,11 @@ function buildStatusTitle(row: Row) {
   const detailsText = row.telegramStatusDetails || row.telegramStatusSummary || ''
   const checkedAt = formatTime(row.telegramStatusCheckedAtUtc, '-')
   return `${detailsText}（检测时间：${checkedAt}）`
+}
+
+function telegramStatusText(row: Row) {
+  if (!row.telegramStatusSummary) return '未检测'
+  return row.telegramStatusOk ? row.telegramStatusSummary : '失效'
 }
 
 async function openDetails(row: Row) {

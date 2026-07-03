@@ -225,7 +225,7 @@
         <el-table-column label="Telegram 状态" min-width="180">
           <template #default="{ row }">
             <el-tooltip v-if="row.telegramStatusSummary" :content="row.telegramStatusDetails || row.telegramStatusSummary" placement="top">
-              <el-tag :type="row.telegramStatusOk ? 'success' : 'danger'" size="small">{{ row.telegramStatusSummary }}</el-tag>
+              <el-tag :type="row.telegramStatusOk ? 'success' : 'danger'" size="small">{{ telegramStatusText(row) }}</el-tag>
             </el-tooltip>
             <el-tag v-else type="info" size="small">未检测</el-tag>
           </template>
@@ -498,6 +498,11 @@ const selectionIcon = computed<Component>(() => {
   if (selectionMode.value === 'clear') return Delete
   return Select
 })
+
+function telegramStatusText(row: Row) {
+  if (!row.telegramStatusSummary) return '未检测'
+  return row.telegramStatusOk ? row.telegramStatusSummary : '失效'
+}
 
 const categoryDialog = reactive({
   visible: false,
