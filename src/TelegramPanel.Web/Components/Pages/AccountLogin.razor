@@ -6,9 +6,9 @@
 @inject NavigationManager Navigation
 @using TelegramPanel.Data.Entities
 
-<PageTitle>手机号登录 - Telegram Panel</PageTitle>
+<PageTitle>手动登录 - Telegram Panel</PageTitle>
 
-<MudText Typo="Typo.h4" Class="mb-4">手机号登录</MudText>
+<MudText Typo="Typo.h4" Class="mb-4">手动登录</MudText>
 
 <MudGrid>
     <MudItem xs="12" md="6" Class="mx-auto">
@@ -145,7 +145,7 @@
         LoginStep.Code => "步骤 2/3：输入验证码",
         LoginStep.Password => "步骤 3/3：输入两步验证密码",
         LoginStep.Done => "完成",
-        _ => "手机号登录"
+        _ => "手动登录"
     };
 
     private string PrimaryButtonText => currentStep switch

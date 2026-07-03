@@ -264,7 +264,7 @@ const staticMenuItems: MenuItem[] = [
     children: [
       { index: '/accounts', label: '账号列表', icon: 'people' },
       { index: '/accounts/import', label: '导入账号', icon: 'upload' },
-      { index: '/accounts/login', label: '手机号登录', icon: 'login' },
+      { index: '/accounts/login', label: '手动登录', icon: 'login' },
       { index: '/accounts/categories', label: '账号分类', icon: 'category' },
     ],
   },

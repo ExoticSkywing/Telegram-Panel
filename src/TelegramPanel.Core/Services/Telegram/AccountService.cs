@@ -1,8 +1,10 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Configuration;
+using System.Collections.Concurrent;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Models;
 using TelegramPanel.Core.Utils;
+using WTelegram;
 using AccountStatus = TelegramPanel.Core.Interfaces.AccountStatus;
 
 namespace TelegramPanel.Core.Services.Telegram;
@@ -18,6 +20,7 @@ public class AccountService : IAccountService
 
     // 临时存储登录状态（实际项目应该使用数据库或缓存）
     private readonly Dictionary<int, string> _pendingLogins = new();
+    private static readonly ConcurrentDictionary<int, QrLoginSession> QrLoginSessions = new();
 
     public AccountService(ITelegramClientPool clientPool, ILogger<AccountService> logger, IConfiguration configuration)
     {
@@ -119,6 +122,140 @@ public class AccountService : IAccountService
             _logger.LogWarning(ex, "StartLogin failed for phone {Phone} (accountId={AccountId}): {Hint}", normalizedPhone, accountId, hint);
             return new LoginResult(false, null, hint);
         }
+    }
+
+    public async Task<QrLoginResult> StartQrLoginAsync(int loginId)
+    {
+        if (loginId <= 0)
+            loginId = Random.Shared.Next(1, int.MaxValue);
+
+        var api = ValidateTelegramApi();
+        if (!api.Valid)
+            return new QrLoginResult(false, loginId, "failed", api.Error);
+
+        var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
+        Directory.CreateDirectory(sessionsPath);
+        var tempPath = Path.Combine(sessionsPath, $".qr-login-{loginId}-{Guid.NewGuid():N}.session");
+
+        await CancelQrLoginAsync(loginId);
+
+        var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+        var session = new QrLoginSession(loginId, tempPath, api.ApiId, api.ApiHash, cts);
+        if (!QrLoginSessions.TryAdd(loginId, session))
+        {
+            cts.Dispose();
+            return new QrLoginResult(false, loginId, "failed", "无法创建扫码登录会话，请重试");
+        }
+
+        try
+        {
+            session.Client = CreateStandaloneClient(api.ApiId, api.ApiHash, tempPath, api.ApiHash);
+            session.LoginTask = RunQrLoginAsync(session);
+
+            for (var i = 0; i < 40; i++)
+            {
+                if (!string.IsNullOrWhiteSpace(session.QrLoginUrl))
+                    return session.ToResult();
+
+                if (session.LoginTask.IsCompleted)
+                    return await PollQrLoginAsync(loginId);
+
+                await Task.Delay(100, CancellationToken.None);
+            }
+
+            return session.ToResult("pending", "二维码正在生成，请稍后刷新");
+        }
+        catch (Exception ex)
+        {
+            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            _logger.LogWarning(ex, "Start QR login failed (loginId={LoginId})", loginId);
+            return new QrLoginResult(false, loginId, "failed", BuildFriendlyQrLoginError(ex));
+        }
+    }
+
+    public async Task<QrLoginResult> PollQrLoginAsync(int loginId)
+    {
+        if (!QrLoginSessions.TryGetValue(loginId, out var session))
+            return new QrLoginResult(false, loginId, "expired", "扫码登录会话已失效，请重新生成二维码");
+
+        if (session.LoginTask is { IsCompleted: true })
+            await ApplyQrLoginTaskResultAsync(session);
+
+        if (session.Status is "authorized" && session.Account != null)
+        {
+            await FinalizeQrLoginSessionAsync(session);
+            return session.ToResult();
+        }
+
+        if (session.Status is "failed" or "expired")
+        {
+            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            return session.ToResult();
+        }
+
+        if (session.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+        {
+            session.Status = "expired";
+            session.Message = "二维码已过期，请重新生成";
+            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            return session.ToResult();
+        }
+
+        return session.ToResult();
+    }
+
+    public async Task<QrLoginResult> SubmitQrPasswordAsync(int loginId, string password)
+    {
+        if (!QrLoginSessions.TryGetValue(loginId, out var session))
+            return new QrLoginResult(false, loginId, "expired", "扫码登录会话已失效，请重新生成二维码");
+
+        password = password ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(password))
+            return session.ToResult("password", "请输入两步验证密码");
+
+        if (session.Client == null)
+            return new QrLoginResult(false, loginId, "failed", "扫码登录客户端已释放，请重新生成二维码");
+
+        try
+        {
+            var result = await session.Client.Login(password);
+            if (session.Client.User != null)
+            {
+                session.Account = MapToAccountInfo(loginId, session.Client);
+                session.Status = "authorized";
+                session.Message = "扫码登录成功";
+                await FinalizeQrLoginSessionAsync(session);
+                return session.ToResult();
+            }
+
+            session.Status = result == "password" ? "password" : "failed";
+            session.Message = result == "password" ? "两步验证密码错误" : $"验证失败：{result}";
+            if (session.Status == "failed")
+                await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+
+            return session.ToResult();
+        }
+        catch (Exception ex)
+        {
+            if (LooksLikePasswordRequired(ex))
+                return session.ToResult("password", "请输入两步验证密码");
+
+            session.Status = "failed";
+            session.Message = BuildFriendlyQrLoginError(ex);
+            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            _logger.LogWarning(ex, "Submit QR password failed (loginId={LoginId})", loginId);
+            return session.ToResult();
+        }
+    }
+
+    public Task CancelQrLoginAsync(int loginId)
+    {
+        return CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+    }
+
+    public Task ReleaseCompletedQrLoginAsync(int loginId)
+    {
+        return CleanupQrLoginSessionAsync(loginId, deleteSessionFile: false);
     }
 
     private static string BuildFriendlyStartLoginError(Exception ex)
@@ -306,6 +443,222 @@ public class AccountService : IAccountService
         return _clientPool.RemoveClientAsync(accountId);
     }
 
+    private async Task RunQrLoginAsync(QrLoginSession session)
+    {
+        try
+        {
+            var client = session.Client ?? throw new InvalidOperationException("扫码登录客户端未初始化");
+            var user = await client.LoginWithQRCode(
+                qrDisplay: loginUrl =>
+                {
+                    session.QrLoginUrl = loginUrl;
+                    session.ExpiresAtUtc = DateTimeOffset.UtcNow.AddSeconds(55);
+                    session.Status = "pending";
+                    session.Message = "请使用 Telegram 扫描二维码并确认登录";
+                },
+                except_ids: Array.Empty<long>(),
+                logoutFirst: false,
+                ct: session.Cancellation.Token);
+
+            if (user == null)
+            {
+                session.Status = "failed";
+                session.Message = "Telegram 未返回扫码登录结果";
+                return;
+            }
+
+            session.Account = MapToAccountInfo(session.LoginId, client);
+            session.Status = "authorized";
+            session.Message = "扫码登录成功";
+        }
+        catch (OperationCanceledException)
+        {
+            session.Status = "expired";
+            session.Message = "扫码登录已取消或已超时";
+        }
+        catch (Exception ex) when (LooksLikePasswordRequired(ex))
+        {
+            session.Status = "password";
+            session.Message = "此账号启用了两步验证，请输入密码";
+        }
+        catch (Exception ex)
+        {
+            session.Status = "failed";
+            session.Message = BuildFriendlyQrLoginError(ex);
+            _logger.LogWarning(ex, "QR login task failed (loginId={LoginId})", session.LoginId);
+        }
+    }
+
+    private async Task ApplyQrLoginTaskResultAsync(QrLoginSession session)
+    {
+        if (session.LoginTask == null)
+            return;
+
+        try
+        {
+            await session.LoginTask;
+        }
+        catch (OperationCanceledException)
+        {
+            session.Status = "expired";
+            session.Message = "扫码登录已取消或已超时";
+        }
+        catch (Exception ex)
+        {
+            session.Status = "failed";
+            session.Message = BuildFriendlyQrLoginError(ex);
+            _logger.LogWarning(ex, "QR login task result failed (loginId={LoginId})", session.LoginId);
+        }
+    }
+
+    private async Task FinalizeQrLoginSessionAsync(QrLoginSession session)
+    {
+        if (session.Account?.Phone == null)
+            return;
+
+        var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
+        Directory.CreateDirectory(sessionsPath);
+        var phoneDigits = PhoneNumberFormatter.NormalizeToDigits(session.Account.Phone);
+        if (string.IsNullOrWhiteSpace(phoneDigits))
+            return;
+
+        var finalPath = Path.Combine(sessionsPath, $"{phoneDigits}.session");
+
+        try
+        {
+            if (session.Client != null)
+                await session.Client.DisposeAsync();
+        }
+        catch
+        {
+            // 忽略释放失败，后续仍尝试迁移 session 文件
+        }
+
+        try
+        {
+            if (File.Exists(session.TempSessionPath))
+            {
+                TryBackupSqliteSessionIfExists(finalPath);
+                File.Move(session.TempSessionPath, finalPath, overwrite: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            session.Status = "failed";
+            session.Message = $"扫码登录成功，但保存 session 文件失败：{ex.Message}";
+            _logger.LogWarning(ex, "Failed to move QR login session file (loginId={LoginId})", session.LoginId);
+            return;
+        }
+
+        session.Client = null;
+        session.KeepTempSession = true;
+    }
+
+    private WTelegram.Client CreateStandaloneClient(int apiId, string apiHash, string sessionPath, string sessionKey)
+    {
+        string Config(string what)
+        {
+            var proxyServer = (_configuration["Telegram:Proxy:Server"] ?? "").Trim();
+            var proxyPort = (_configuration["Telegram:Proxy:Port"] ?? "").Trim();
+            var proxyUsername = (_configuration["Telegram:Proxy:Username"] ?? "").Trim();
+            var proxyPassword = (_configuration["Telegram:Proxy:Password"] ?? "").Trim();
+            var proxySecret = (_configuration["Telegram:Proxy:Secret"] ?? "").Trim();
+
+            return what switch
+            {
+                "api_id" => apiId.ToString(),
+                "api_hash" => apiHash,
+                "session_pathname" => sessionPath,
+                "session_key" => sessionKey,
+                "proxy_server" => string.IsNullOrWhiteSpace(proxyServer) ? null! : proxyServer,
+                "proxy_port" => string.IsNullOrWhiteSpace(proxyPort) ? null! : proxyPort,
+                "proxy_username" => string.IsNullOrWhiteSpace(proxyUsername) ? null! : proxyUsername,
+                "proxy_password" => string.IsNullOrWhiteSpace(proxyPassword) ? null! : proxyPassword,
+                "proxy_secret" => string.IsNullOrWhiteSpace(proxySecret) ? null! : proxySecret,
+                _ => null!
+            };
+        }
+
+        return new WTelegram.Client(Config);
+    }
+
+    private async Task CleanupQrLoginSessionAsync(int loginId, bool deleteSessionFile)
+    {
+        if (!QrLoginSessions.TryRemove(loginId, out var session))
+            return;
+
+        try
+        {
+            session.Cancellation.Cancel();
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            if (session.Client != null)
+                await session.Client.DisposeAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Failed to dispose QR login client (loginId={LoginId})", loginId);
+        }
+
+        session.Cancellation.Dispose();
+
+        if (deleteSessionFile && !session.KeepTempSession)
+            TryDeleteFile(session.TempSessionPath);
+    }
+
+    private (bool Valid, int ApiId, string ApiHash, string? Error) ValidateTelegramApi()
+    {
+        if (!int.TryParse(_configuration["Telegram:ApiId"], out var apiId) || apiId <= 0)
+            return (false, 0, string.Empty, "请先在【系统设置】中配置全局 Telegram API（ApiId/ApiHash）");
+
+        if (!TelegramApiConfigValidator.TryNormalizeApiHash(_configuration["Telegram:ApiHash"], out var apiHash, out var apiHashReason))
+            return (false, 0, string.Empty, $"全局 Telegram API 配置无效：{apiHashReason}");
+
+        return (true, apiId, apiHash, null);
+    }
+
+    private static bool LooksLikePasswordRequired(Exception ex)
+    {
+        var msg = ex.Message ?? string.Empty;
+        return msg.Contains("SESSION_PASSWORD_NEEDED", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("PASSWORD", StringComparison.OrdinalIgnoreCase) && msg.Contains("NEEDED", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("config value for password", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildFriendlyQrLoginError(Exception ex)
+    {
+        if (LooksLikePasswordRequired(ex))
+            return "此账号启用了两步验证，请输入密码";
+
+        var msg = (ex.Message ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(msg))
+            return $"扫码登录失败：{ex.GetType().Name}";
+
+        if (msg.Contains("FLOOD_WAIT", StringComparison.OrdinalIgnoreCase))
+            return $"扫码登录触发 Telegram 限流：{msg}";
+
+        return $"扫码登录失败：{ex.GetType().Name}: {msg}";
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
+                File.Delete(path);
+        }
+        catch
+        {
+            // ignore
+        }
+    }
+
     private static AccountInfo MapToAccountInfo(int accountId, WTelegram.Client client)
     {
         var user = client.User!;
@@ -342,5 +695,49 @@ public class AccountService : IAccountService
             throw new ArgumentException("手机号格式不正确，请包含国家代码（例如：+8613800138000）", nameof(phone));
 
         return new string(buf[..n]);
+    }
+
+    private sealed class QrLoginSession
+    {
+        public QrLoginSession(int loginId, string tempSessionPath, int apiId, string apiHash, CancellationTokenSource cancellation)
+        {
+            LoginId = loginId;
+            TempSessionPath = tempSessionPath;
+            ApiId = apiId;
+            ApiHash = apiHash;
+            Cancellation = cancellation;
+            ExpiresAtUtc = DateTimeOffset.UtcNow.AddMinutes(5);
+        }
+
+        public int LoginId { get; }
+        public string TempSessionPath { get; }
+        public int ApiId { get; }
+        public string ApiHash { get; }
+        public CancellationTokenSource Cancellation { get; }
+        public WTelegram.Client? Client { get; set; }
+        public Task? LoginTask { get; set; }
+        public string Status { get; set; } = "pending";
+        public string? Message { get; set; } = "请使用 Telegram 扫描二维码并确认登录";
+        public string? QrLoginUrl { get; set; }
+        public DateTimeOffset ExpiresAtUtc { get; set; }
+        public AccountInfo? Account { get; set; }
+        public bool KeepTempSession { get; set; }
+
+        public QrLoginResult ToResult(string? status = null, string? message = null)
+        {
+            if (!string.IsNullOrWhiteSpace(status))
+                Status = status;
+            if (!string.IsNullOrWhiteSpace(message))
+                Message = message;
+
+            return new QrLoginResult(
+                Success: Status == "authorized" && Account != null,
+                LoginId: LoginId,
+                Status: Status,
+                Message: Message,
+                QrLoginUrl: QrLoginUrl,
+                ExpiresAtUtc: ExpiresAtUtc,
+                Account: Account);
+        }
     }
 }

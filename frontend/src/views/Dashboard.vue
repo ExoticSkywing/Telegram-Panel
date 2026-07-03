@@ -1,5 +1,5 @@
 <template>
-  <div>
+  <div class="dashboard-page">
     <div class="stat-grid">
       <el-card v-for="item in stats" :key="item.label" shadow="never" class="stat-card">
         <div class="stat-card-inner">
@@ -12,7 +12,7 @@
       </el-card>
     </div>
 
-    <el-row :gutter="16" class="mt-4">
+    <el-row :gutter="12" class="mt-3 dashboard-row">
       <el-col :xs="24" :md="12">
         <el-card class="page-card dashboard-panel" shadow="never">
           <template #header>
@@ -49,7 +49,7 @@
       </el-col>
     </el-row>
 
-    <el-card class="page-card mt-4" shadow="never">
+    <el-card class="page-card mt-3 dashboard-task-card" shadow="never">
       <template #header>
         <span>最近任务</span>
       </template>
@@ -191,6 +191,26 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.dashboard-page {
+  width: min(1152px, 100%);
+  margin: 0 auto;
+}
+
+.dashboard-page :deep(.stat-grid) {
+  width: 100%;
+  gap: 12px;
+}
+
+.dashboard-page :deep(.stat-card) {
+  border-color: #d7dce3;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.16);
+}
+
+.dashboard-page :deep(.stat-card .el-card__body) {
+  padding: 16px 18px;
+}
+
 .stat-card-inner {
   display: flex;
   align-items: center;
@@ -198,8 +218,8 @@ onUnmounted(() => {
 }
 
 .stat-icon {
-  font-size: 34px;
-  width: 38px;
+  font-size: 30px;
+  width: 36px;
   text-align: center;
 }
 
@@ -220,7 +240,32 @@ onUnmounted(() => {
 }
 
 .dashboard-panel {
-  min-height: 154px;
+  min-height: 116px;
+  border-color: #d7dce3;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.16);
+}
+
+.dashboard-panel :deep(.el-card__header),
+.dashboard-task-card :deep(.el-card__header) {
+  padding: 12px 14px;
+  color: #1f2937;
+  font-weight: 500;
+  border-bottom-color: #d7dce3;
+}
+
+.dashboard-panel :deep(.el-card__body) {
+  padding: 14px;
+}
+
+.dashboard-task-card {
+  border-color: #d7dce3;
+  background: #fff;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.16);
+}
+
+.dashboard-task-card :deep(.el-card__body) {
+  padding: 12px;
 }
 
 .quick-actions {
@@ -231,7 +276,7 @@ onUnmounted(() => {
 
 .status-list {
   display: grid;
-  gap: 12px;
+  gap: 10px;
 }
 
 .status-row {
@@ -241,8 +286,8 @@ onUnmounted(() => {
 }
 
 .status-dot {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border-radius: 999px;
 }
 
@@ -256,5 +301,19 @@ onUnmounted(() => {
 
 .status-dot.danger {
   background: #f56c6c;
+}
+
+html.dark .dashboard-page :deep(.stat-card),
+html.dark .dashboard-panel,
+html.dark .dashboard-task-card {
+  border-color: var(--tp-border);
+  background: var(--tp-panel);
+  box-shadow: var(--tp-card-shadow);
+}
+
+html.dark .dashboard-panel :deep(.el-card__header),
+html.dark .dashboard-task-card :deep(.el-card__header) {
+  color: var(--tp-text);
+  border-bottom-color: var(--tp-border);
 }
 </style>

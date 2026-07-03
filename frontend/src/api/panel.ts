@@ -20,6 +20,7 @@ import type {
   ImportAccountsResponse,
   LoginEmailStatus,
   AccountLoginResponse,
+  AccountQrLoginResponse,
   BotChatOption,
   ChannelAdminDefaults,
   BotAdminRightsPayload,
@@ -226,6 +227,14 @@ export const panelApi = {
     api.post<ImportAccountsResponse>('/accounts/import/string-session', payload, { timeout: 300_000 }).then((r) => r.data),
   startAccountLogin: (payload: { phone: string; loginId?: number }) =>
     api.post<AccountLoginResponse>('/accounts/login/start', payload, { timeout: 120_000 }).then((r) => r.data),
+  startAccountQrLogin: (loginId?: number) =>
+    api.post<AccountQrLoginResponse>('/accounts/login/qr/start', { loginId: loginId || 0 }, { timeout: 120_000 }).then((r) => r.data),
+  pollAccountQrLogin: (loginId: number) =>
+    api.post<AccountQrLoginResponse>('/accounts/login/qr/poll', { loginId }, { timeout: 120_000 }).then((r) => r.data),
+  submitAccountQrLoginPassword: (loginId: number, password: string) =>
+    api.post<AccountQrLoginResponse>('/accounts/login/qr/password', { loginId, password }, { timeout: 120_000 }).then((r) => r.data),
+  cancelAccountQrLogin: (loginId: number) =>
+    api.post<OperationResult>('/accounts/login/qr/cancel', { loginId }).then((r) => r.data),
   submitAccountLoginCode: (loginId: number, code: string) =>
     api.post<AccountLoginResponse>('/accounts/login/code', { loginId, code }, { timeout: 120_000 }).then((r) => r.data),
   resendAccountLoginCode: (loginId: number) =>

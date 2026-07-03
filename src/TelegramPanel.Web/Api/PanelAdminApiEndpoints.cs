@@ -105,6 +105,10 @@ public static class PanelAdminApiEndpoints
         secured.MapPost("/accounts/import/session-files", ImportAccountsSessionFilesAsync).DisableAntiforgery();
         secured.MapPost("/accounts/import/string-session", ImportAccountsStringSessionAsync);
         secured.MapPost("/accounts/login/start", StartAccountLoginAsync);
+        secured.MapPost("/accounts/login/qr/start", StartAccountQrLoginAsync);
+        secured.MapPost("/accounts/login/qr/poll", PollAccountQrLoginAsync);
+        secured.MapPost("/accounts/login/qr/password", SubmitAccountQrLoginPasswordAsync);
+        secured.MapPost("/accounts/login/qr/cancel", CancelAccountQrLoginAsync);
         secured.MapPost("/accounts/login/code", SubmitAccountLoginCodeAsync);
         secured.MapPost("/accounts/login/resend", ResendAccountLoginCodeAsync);
         secured.MapPost("/accounts/login/password", SubmitAccountLoginPasswordAsync);
@@ -1684,6 +1688,60 @@ public static class PanelAdminApiEndpoints
         var loginId = request.LoginId > 0 ? request.LoginId : Random.Shared.Next(1, int.MaxValue);
         var result = await accountService.StartLoginAsync(loginId, phone);
         return await BuildLoginResponseAsync(loginId, result, accountService, accountManagement, configuration);
+    }
+
+    private static async Task<IResult> StartAccountQrLoginAsync(
+        StartAccountQrLoginRequestDto request,
+        IAccountService accountService,
+        AccountManagementService accountManagement,
+        IConfiguration configuration)
+    {
+        if (!TryGetTelegramApi(configuration, out _, out _, out var apiError))
+            return Results.Ok(new AccountQrLoginResponseDto(false, request.LoginId, "failed", apiError, null, null, null));
+
+        var loginId = request.LoginId > 0 ? request.LoginId : Random.Shared.Next(1, int.MaxValue);
+        var result = await accountService.StartQrLoginAsync(loginId);
+        return await BuildQrLoginResponseAsync(result, accountService, accountManagement, configuration);
+    }
+
+    private static async Task<IResult> PollAccountQrLoginAsync(
+        AccountLoginSessionRequestDto request,
+        IAccountService accountService,
+        AccountManagementService accountManagement,
+        IConfiguration configuration)
+    {
+        if (request.LoginId <= 0)
+            return Results.Ok(new AccountQrLoginResponseDto(false, request.LoginId, "expired", "扫码登录会话已失效，请重新生成二维码", null, null, null));
+
+        var result = await accountService.PollQrLoginAsync(request.LoginId);
+        return await BuildQrLoginResponseAsync(result, accountService, accountManagement, configuration);
+    }
+
+    private static async Task<IResult> SubmitAccountQrLoginPasswordAsync(
+        AccountLoginPasswordRequestDto request,
+        IAccountService accountService,
+        AccountManagementService accountManagement,
+        IConfiguration configuration)
+    {
+        if (request.LoginId <= 0)
+            return Results.Ok(new AccountQrLoginResponseDto(false, request.LoginId, "expired", "扫码登录会话已失效，请重新生成二维码", null, null, null));
+
+        var password = request.Password ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(password))
+            return Results.Ok(new AccountQrLoginResponseDto(false, request.LoginId, "password", "请输入两步验证密码", null, null, null));
+
+        var result = await accountService.SubmitQrPasswordAsync(request.LoginId, password);
+        return await BuildQrLoginResponseAsync(result, accountService, accountManagement, configuration);
+    }
+
+    private static async Task<IResult> CancelAccountQrLoginAsync(
+        AccountLoginSessionRequestDto request,
+        IAccountService accountService)
+    {
+        if (request.LoginId > 0)
+            await accountService.CancelQrLoginAsync(request.LoginId);
+
+        return Results.Ok(new OperationResultDto(true, "扫码登录会话已取消"));
     }
 
     private static async Task<IResult> SubmitAccountLoginCodeAsync(
@@ -4968,6 +5026,8 @@ public static class PanelAdminApiEndpoints
             try
             {
                 await accountService.ReleaseClientAsync(loginId);
+                if (account.Id != loginId)
+                    await accountService.ReleaseClientAsync(account.Id);
             }
             catch
             {
@@ -5007,6 +5067,46 @@ public static class PanelAdminApiEndpoints
         return Results.BadRequest(new AccountLoginResponseDto(false, loginId, null, result.Message ?? "登录失败", null));
     }
 
+    private static async Task<IResult> BuildQrLoginResponseAsync(
+        QrLoginResult result,
+        IAccountService accountService,
+        AccountManagementService accountManagement,
+        IConfiguration configuration)
+    {
+        if (result.Success && result.Account != null)
+        {
+            var account = await SaveLoggedInAccountAsync(result.Account, accountManagement, configuration);
+            try
+            {
+                await accountService.ReleaseCompletedQrLoginAsync(result.LoginId);
+                if (account.Id != result.LoginId)
+                    await accountService.ReleaseClientAsync(account.Id);
+            }
+            catch
+            {
+                // session 文件已在服务层迁移完成，这里只做会话表清理
+            }
+
+            return Results.Ok(new AccountQrLoginResponseDto(
+                true,
+                result.LoginId,
+                "authorized",
+                result.Message ?? "扫码登录成功",
+                null,
+                result.ExpiresAtUtc,
+                ToDto(account)));
+        }
+
+        return Results.Ok(new AccountQrLoginResponseDto(
+            false,
+            result.LoginId,
+            result.Status,
+            result.Message,
+            result.QrLoginUrl,
+            result.ExpiresAtUtc,
+            null));
+    }
+
     private static async Task<Account> SaveLoggedInAccountAsync(
         AccountInfo accountInfo,
         AccountManagementService accountManagement,
@@ -5023,12 +5123,17 @@ public static class PanelAdminApiEndpoints
         var existing = await accountManagement.GetAccountByPhoneAsync(phoneDigits);
         if (existing != null)
         {
+            existing.SessionPath = Path.Combine(sessionsPath, $"{phoneDigits}.session");
             existing.UserId = accountInfo.TelegramUserId;
             existing.Username = accountInfo.Username;
             existing.Nickname = BuildNickname(accountInfo);
             existing.IsActive = true;
             existing.ApiId = apiId;
             existing.ApiHash = apiHash;
+            existing.TelegramStatusSummary = "正常";
+            existing.TelegramStatusDetails = null;
+            existing.TelegramStatusOk = true;
+            existing.TelegramStatusCheckedAtUtc = DateTime.UtcNow;
             existing.LastSyncAt = DateTime.UtcNow;
             existing.LastLoginAt = DateTime.UtcNow;
             await accountManagement.UpdateAccountAsync(existing);
@@ -5877,6 +5982,14 @@ public sealed record AccountLoginResponseDto(
     string? NextStep,
     string? Message,
     AccountListItemDto? Account);
+public sealed record AccountQrLoginResponseDto(
+    bool Success,
+    int LoginId,
+    string Status,
+    string? Message,
+    string? QrLoginUrl,
+    DateTimeOffset? ExpiresAtUtc,
+    AccountListItemDto? Account);
 
 public sealed record SetActiveRequestDto(bool IsActive);
 public sealed record SetEnabledRequestDto(bool IsEnabled);
@@ -5934,6 +6047,7 @@ public sealed record BatchChangeRecoveryEmailRequestDto(
     string? SubjectFilter);
 public sealed record ImportStringSessionRequestDto(string? SessionString, int? CategoryId);
 public sealed record StartAccountLoginRequestDto(string? Phone, int LoginId = 0);
+public sealed record StartAccountQrLoginRequestDto(int LoginId = 0);
 public sealed record AccountLoginSessionRequestDto(int LoginId);
 public sealed record AccountLoginCodeRequestDto(int LoginId, string? Code);
 public sealed record AccountLoginPasswordRequestDto(int LoginId, string? Password);

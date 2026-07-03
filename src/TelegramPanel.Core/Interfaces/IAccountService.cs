@@ -13,6 +13,31 @@ public interface IAccountService
     Task<LoginResult> StartLoginAsync(int accountId, string phone);
 
     /// <summary>
+    /// 发起二维码登录。
+    /// </summary>
+    Task<QrLoginResult> StartQrLoginAsync(int loginId);
+
+    /// <summary>
+    /// 查询二维码登录状态。
+    /// </summary>
+    Task<QrLoginResult> PollQrLoginAsync(int loginId);
+
+    /// <summary>
+    /// 提交二维码登录过程中要求的两步验证密码。
+    /// </summary>
+    Task<QrLoginResult> SubmitQrPasswordAsync(int loginId, string password);
+
+    /// <summary>
+    /// 取消二维码登录并释放临时会话。
+    /// </summary>
+    Task CancelQrLoginAsync(int loginId);
+
+    /// <summary>
+    /// 释放已完成的二维码登录内存状态，保留已经迁移完成的正式 session 文件。
+    /// </summary>
+    Task ReleaseCompletedQrLoginAsync(int loginId);
+
+    /// <summary>
     /// 提交验证码完成登录
     /// </summary>
     Task<LoginResult> SubmitCodeAsync(int accountId, string code);
@@ -55,6 +80,19 @@ public record LoginResult(
     bool Success,
     string? NextStep,  // null=完成, "code"=需要验证码, "password"=需要密码, "signup"=需要注册
     string? Message,
+    AccountInfo? Account = null
+);
+
+/// <summary>
+/// 二维码登录结果。
+/// </summary>
+public record QrLoginResult(
+    bool Success,
+    int LoginId,
+    string Status,
+    string? Message,
+    string? QrLoginUrl = null,
+    DateTimeOffset? ExpiresAtUtc = null,
     AccountInfo? Account = null
 );
 

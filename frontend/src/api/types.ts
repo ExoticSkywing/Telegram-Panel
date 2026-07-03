@@ -310,6 +310,16 @@ export interface AccountLoginResponse {
   account?: AccountListItem | null
 }
 
+export interface AccountQrLoginResponse {
+  success: boolean
+  loginId: number
+  status: 'pending' | 'authorized' | 'password' | 'expired' | 'failed' | string
+  message?: string | null
+  qrLoginUrl?: string | null
+  expiresAtUtc?: string | null
+  account?: AccountListItem | null
+}
+
 export interface CleanupWasteResult {
   deleted: number
   skipped: number
