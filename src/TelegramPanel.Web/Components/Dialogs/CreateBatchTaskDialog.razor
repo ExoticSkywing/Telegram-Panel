@@ -5,6 +5,7 @@
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject NavigationManager Navigation
+@inject PanelTimeZoneService TimeZone
 @using System.Text.Json
 @using Microsoft.AspNetCore.Components
 @using TelegramPanel.Data.Entities
@@ -51,7 +52,7 @@
             @if (IsScheduledMode)
             {
                 <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true">
-                    Cron 按服务器本地时区解析：<b>@TimeZoneInfo.Local.Id</b>
+                    Cron 按面板时区解析：<b>@TimeZone.Current.Id</b>
                 </MudAlert>
 
                 <MudTextField @bind-Value="cronExpression"

@@ -11,15 +11,18 @@ public sealed class ScheduledTaskService
 {
     private readonly IScheduledTaskRepository _scheduledTaskRepository;
     private readonly CronExpressionService _cronExpressionService;
+    private readonly PanelTimeZoneService _timeZone;
     private readonly ImageAssetStorageService _assetStorage;
 
     public ScheduledTaskService(
         IScheduledTaskRepository scheduledTaskRepository,
         CronExpressionService cronExpressionService,
+        PanelTimeZoneService timeZone,
         ImageAssetStorageService assetStorage)
     {
         _scheduledTaskRepository = scheduledTaskRepository;
         _cronExpressionService = cronExpressionService;
+        _timeZone = timeZone;
         _assetStorage = assetStorage;
     }
 
@@ -38,7 +41,7 @@ public sealed class ScheduledTaskService
         Normalize(task);
         task.CreatedAt = DateTime.UtcNow;
         task.UpdatedAt = DateTime.UtcNow;
-        task.NextRunAtUtc = _cronExpressionService.GetNextOccurrenceUtc(task.CronExpression, DateTime.UtcNow);
+        task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, DateTime.UtcNow);
         return await _scheduledTaskRepository.AddAsync(task);
     }
 
@@ -46,7 +49,7 @@ public sealed class ScheduledTaskService
     {
         Normalize(task);
         task.UpdatedAt = DateTime.UtcNow;
-        task.NextRunAtUtc = _cronExpressionService.GetNextOccurrenceUtc(task.CronExpression, DateTime.UtcNow);
+        task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, DateTime.UtcNow);
         await _scheduledTaskRepository.UpdateAsync(task);
         return task;
     }
@@ -70,7 +73,7 @@ public sealed class ScheduledTaskService
 
         task.Status = ScheduledTaskStatuses.Enabled;
         task.UpdatedAt = DateTime.UtcNow;
-        task.NextRunAtUtc = _cronExpressionService.GetNextOccurrenceUtc(task.CronExpression, DateTime.UtcNow);
+        task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, DateTime.UtcNow);
         await _scheduledTaskRepository.UpdateAsync(task);
     }
 
@@ -105,7 +108,7 @@ public sealed class ScheduledTaskService
         task.LastRunAtUtc = triggeredAtUtc;
         task.LastBatchTaskId = batchTaskId;
         task.UpdatedAt = DateTime.UtcNow;
-        task.NextRunAtUtc = _cronExpressionService.GetNextOccurrenceUtc(task.CronExpression, triggeredAtUtc);
+        task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, triggeredAtUtc);
         await _scheduledTaskRepository.UpdateAsync(task);
     }
 
@@ -116,8 +119,23 @@ public sealed class ScheduledTaskService
             return;
 
         task.UpdatedAt = DateTime.UtcNow;
-        task.NextRunAtUtc = _cronExpressionService.GetNextOccurrenceUtc(task.CronExpression, fromUtc);
+        task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, fromUtc);
         await _scheduledTaskRepository.UpdateAsync(task);
+    }
+
+    public async Task<int> RecalculateNextRunsAsync(DateTime fromUtc, CancellationToken cancellationToken = default)
+    {
+        var tasks = await _scheduledTaskRepository.GetAllOrderedAsync(cancellationToken);
+        var updated = 0;
+        foreach (var task in tasks.Where(x => x.Status == ScheduledTaskStatuses.Enabled))
+        {
+            task.UpdatedAt = DateTime.UtcNow;
+            task.NextRunAtUtc = GetNextRunAtUtc(task.CronExpression, fromUtc);
+            await _scheduledTaskRepository.UpdateAsync(task);
+            updated++;
+        }
+
+        return updated;
     }
 
     public string ValidateCronOrThrow(string expression)
@@ -138,6 +156,11 @@ public sealed class ScheduledTaskService
         task.OwnedAssetScopeId = NormalizeNullable(task.OwnedAssetScopeId);
         if (task.Total < 0)
             task.Total = 0;
+    }
+
+    private DateTime? GetNextRunAtUtc(string expression, DateTime fromUtc)
+    {
+        return _cronExpressionService.GetNextOccurrenceUtc(expression, fromUtc, _timeZone.Current);
     }
 
     private static string? NormalizeNullable(string? value)

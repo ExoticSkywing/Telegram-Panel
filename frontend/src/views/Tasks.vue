@@ -44,7 +44,7 @@
         <el-table-column label="Cron" width="180">
           <template #default="{ row }">
             <div>{{ row.cronExpression }}</div>
-            <div class="cell-sub">时区：{{ timeZoneId || '服务器本地时区' }}</div>
+            <div class="cell-sub">时区：{{ timeZoneId || 'UTC' }}</div>
           </template>
         </el-table-column>
         <el-table-column label="下次运行" width="180">
@@ -334,7 +334,7 @@
     </el-dialog>
 
     <el-dialog v-model="editScheduledDialog.visible" :title="`编辑计划任务 #${editScheduledDialog.id}`" width="760px" destroy-on-close>
-      <el-alert title="Cron 按服务器本地时区解析。保存后会重新计算下次运行时间。" type="info" :closable="false" class="mb-3" />
+      <el-alert :title="`Cron 按面板时区解析：${timeZoneId || 'UTC'}。保存后会重新计算下次运行时间。`" type="info" :closable="false" class="mb-3" />
       <el-form label-width="96px">
         <el-form-item label="任务类型">
           <el-input :model-value="taskName(editScheduledDialog.form.taskType)" disabled />

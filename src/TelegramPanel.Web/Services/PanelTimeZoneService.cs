@@ -24,6 +24,17 @@ public sealed class PanelTimeZoneService
         }
     }
 
+    public TimeZoneInfo ApplyTimeZoneId(string? timeZoneId)
+    {
+        var tz = Resolve((timeZoneId ?? string.Empty).Trim());
+        lock (_gate)
+        {
+            _timeZone = tz;
+        }
+
+        return tz;
+    }
+
     public string Format(DateTime? valueUtcOrUnspecified, string format = "yyyy-MM-dd HH:mm", string emptyText = "-")
     {
         if (valueUtcOrUnspecified == null)
@@ -75,13 +86,7 @@ public sealed class PanelTimeZoneService
 
     private void Apply(PanelTimeZoneOptions options)
     {
-        var id = (options.TimeZoneId ?? string.Empty).Trim();
-
-        var tz = Resolve(id);
-        lock (_gate)
-        {
-            _timeZone = tz;
-        }
+        ApplyTimeZoneId(options.TimeZoneId);
     }
 
     private static TimeZoneInfo Resolve(string timeZoneId)

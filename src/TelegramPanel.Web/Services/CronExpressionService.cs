@@ -5,10 +5,26 @@ namespace TelegramPanel.Web.Services;
 /// </summary>
 public sealed class CronExpressionService
 {
+    private readonly PanelTimeZoneService? _timeZone;
+
+    public CronExpressionService()
+    {
+    }
+
+    public CronExpressionService(PanelTimeZoneService timeZone)
+    {
+        _timeZone = timeZone;
+    }
+
     public DateTime? GetNextOccurrenceUtc(string expression, DateTime fromUtc)
     {
+        return GetNextOccurrenceUtc(expression, fromUtc, _timeZone?.Current ?? TimeZoneInfo.Utc);
+    }
+
+    public DateTime? GetNextOccurrenceUtc(string expression, DateTime fromUtc, TimeZoneInfo timeZone)
+    {
         var schedule = CronSchedule.Parse(expression);
-        return schedule.GetNextOccurrenceUtc(fromUtc, TimeZoneInfo.Local);
+        return schedule.GetNextOccurrenceUtc(fromUtc, timeZone ?? TimeZoneInfo.Utc);
     }
 
     public bool TryValidate(string expression, out string? error)

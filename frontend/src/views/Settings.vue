@@ -119,7 +119,7 @@
         <el-card shadow="never" class="page-card">
           <template #header>本地化</template>
           <el-form label-position="top">
-            <el-form-item label="时区（用于面板显示）">
+            <el-form-item label="时区（用于面板显示和 Cron 计划）">
               <el-select v-model="timeZone.timeZoneId" class="full">
                 <el-option label="北京时间（Asia/Shanghai）" value="Asia/Shanghai" />
                 <el-option label="UTC" value="UTC" />
@@ -129,7 +129,7 @@
             </el-form-item>
           </el-form>
           <el-alert type="info" :closable="false" show-icon class="mb-3">
-            <template #title>本项目数据库中的时间统一按 UTC 存储；该设置仅影响面板显示的时区转换。</template>
+            <template #title>本项目数据库中的时间统一按 UTC 存储；该设置会影响面板时间显示和 Cron 计划任务的解析时区。</template>
           </el-alert>
           <el-button type="primary" :loading="saving.timeZone" @click="saveTimeZone">保存时区</el-button>
         </el-card>

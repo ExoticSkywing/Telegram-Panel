@@ -1972,13 +1972,25 @@ public static class PanelAdminApiEndpoints
         return Results.Ok(new OperationResultDto(true, deleted > 0 ? $"批量操作配置已保存，并清理 {deleted} 条历史任务" : "批量操作配置已保存"));
     }
 
-    private static async Task<IResult> SaveTimeZoneSettingsAsync(TimeZoneSettingsDto request, IConfiguration configuration, IWebHostEnvironment environment, CancellationToken cancellationToken)
+    private static async Task<IResult> SaveTimeZoneSettingsAsync(
+        TimeZoneSettingsDto request,
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        PanelTimeZoneService timeZone,
+        ScheduledTaskService scheduledTasks,
+        CancellationToken cancellationToken)
     {
+        var timeZoneId = (request.TimeZoneId ?? string.Empty).Trim();
         var root = await LoadLocalConfigRootAsync(LocalConfigFile.ResolvePath(configuration, environment));
         var system = EnsureObject(root, "System");
-        system["TimeZoneId"] = (request.TimeZoneId ?? string.Empty).Trim();
+        system["TimeZoneId"] = timeZoneId;
         await SaveLocalRootAsync(configuration, environment, root, cancellationToken);
-        return Results.Ok(new OperationResultDto(true, "时区设置已保存"));
+
+        timeZone.ApplyTimeZoneId(timeZoneId);
+        var updated = await scheduledTasks.RecalculateNextRunsAsync(DateTime.UtcNow, cancellationToken);
+        return Results.Ok(new OperationResultDto(true, updated > 0
+            ? $"时区设置已保存，已按新时区重算 {updated} 条计划任务"
+            : "时区设置已保存"));
     }
 
     private static async Task<IResult> SaveSyncSettingsAsync(SyncSettingsDto request, IConfiguration configuration, IWebHostEnvironment environment, CancellationToken cancellationToken)
