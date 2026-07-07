@@ -40,12 +40,12 @@ public sealed class ModuleLoadContext : AssemblyLoadContext
             || string.Equals(name, "Microsoft.Data.Sqlite", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("Microsoft.EntityFrameworkCore", StringComparison.OrdinalIgnoreCase)
             || name.StartsWith("SQLitePCLRaw", StringComparison.OrdinalIgnoreCase))
-            return null;
+            return LoadFromDefaultContext(assemblyName);
 
         // 2) 其次：如果宿主已经加载过同名程序集，则同样交给 Default ALC（避免重复加载）。
-        if (AssemblyLoadContext.Default.Assemblies.Any(a =>
-                string.Equals(a.GetName().Name, name, StringComparison.OrdinalIgnoreCase)))
-            return null;
+        var defaultAssembly = FindDefaultAssembly(assemblyName);
+        if (defaultAssembly != null)
+            return defaultAssembly;
 
         var path = _resolver.ResolveAssemblyToPath(assemblyName);
         if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
@@ -60,6 +60,51 @@ public sealed class ModuleLoadContext : AssemblyLoadContext
             return LoadFromAssemblyPath(candidate);
 
         return null;
+    }
+
+    private static Assembly? LoadFromDefaultContext(AssemblyName assemblyName)
+    {
+        var existing = FindDefaultAssembly(assemblyName);
+        if (existing != null)
+            return existing;
+
+        try
+        {
+            return AssemblyLoadContext.Default.LoadFromAssemblyName(assemblyName);
+        }
+        catch (FileNotFoundException)
+        {
+        }
+        catch (FileLoadException)
+        {
+        }
+
+        var name = (assemblyName.Name ?? "").Trim();
+        if (name.Length == 0)
+            return null;
+
+        var candidate = Path.Combine(AppContext.BaseDirectory, name + ".dll");
+        if (!File.Exists(candidate))
+            return null;
+
+        try
+        {
+            return AssemblyLoadContext.Default.LoadFromAssemblyPath(candidate);
+        }
+        catch (FileLoadException)
+        {
+            return FindDefaultAssembly(assemblyName);
+        }
+    }
+
+    private static Assembly? FindDefaultAssembly(AssemblyName assemblyName)
+    {
+        var name = (assemblyName.Name ?? "").Trim();
+        if (name.Length == 0)
+            return null;
+
+        return AssemblyLoadContext.Default.Assemblies
+            .FirstOrDefault(a => string.Equals(a.GetName().Name, name, StringComparison.OrdinalIgnoreCase));
     }
 
     protected override IntPtr LoadUnmanagedDll(string unmanagedDllName)
