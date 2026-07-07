@@ -27,6 +27,9 @@
         新版本 v{{ versionInfo.latestVersion }}
       </el-tag>
       <div class="appbar-spacer" />
+      <el-button link class="appbar-icon" title="重启面板" :disabled="restartPanelLoading" @click="restartPanel">
+        <span class="material-icons">{{ restartPanelLoading ? 'hourglass_empty' : 'restart_alt' }}</span>
+      </el-button>
       <el-button link class="appbar-icon" title="系统设置" @click="router.push('/settings')">
         <span class="material-icons">settings</span>
       </el-button>
@@ -217,6 +220,7 @@ const moduleNavItems = ref<ModuleNavItem[]>([])
 const versionInfo = ref<VersionInfo | null>(null)
 const version = computed(() => versionInfo.value?.currentVersion || auth.me?.version || '')
 const isDark = ref(false)
+const restartPanelLoading = ref(false)
 const versionDialog = ref({
   visible: false,
   loading: false,
@@ -359,6 +363,11 @@ function handleSelect(index: string) {
     return
   }
 
+  if (index.startsWith('direct:')) {
+    window.location.href = index.slice('direct:'.length)
+    return
+  }
+
   router.push(index)
 }
 
@@ -386,6 +395,10 @@ function normalizeModuleHref(href: string) {
 }
 
 function resolveModuleRoute(item: ModuleNavItem) {
+  if (item.uiMode === 'direct') {
+    return `direct:${normalizeModuleHref(item.href)}`
+  }
+
   const pageKey = (item.pageKey || '').trim()
   if (item.moduleId && pageKey) {
     return `/ext/${encodeURIComponent(item.moduleId)}/${encodeURIComponent(pageKey)}`
@@ -452,6 +465,33 @@ async function applyVersionUpdate() {
     await refreshVersionInfo(true)
   } finally {
     versionDialog.value.updating = false
+  }
+}
+
+async function restartPanel() {
+  if (restartPanelLoading.value) return
+
+  await ElMessageBox.confirm(
+    '将请求面板服务重启。Docker、系统服务或桌面版守护进程会自动拉起；如果是直接运行二进制，需要由外部守护负责重新启动。是否继续？',
+    '确认重启面板',
+    {
+      type: 'warning',
+      confirmButtonText: '重启',
+      cancelButtonText: '取消',
+    },
+  )
+
+  restartPanelLoading.value = true
+  try {
+    const result = await panelApi.restartPanel()
+    ElMessage.success(result.message || '已提交重启请求')
+    window.setTimeout(() => {
+      window.location.reload()
+    }, 8000)
+  } finally {
+    window.setTimeout(() => {
+      restartPanelLoading.value = false
+    }, 10000)
   }
 }
 

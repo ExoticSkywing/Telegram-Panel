@@ -10,11 +10,14 @@ public static class BatchTaskTypes
     public const string SetAdmin = "set_admin";
     public const string BotChannelSetAdminsByAccount = "bot_channel_set_admins_by_account";
     public const string BotSetAdmins = "bot_set_admins";
+    public const string BotChannelInviteUsers = "bot_channel_invite_users";
     public const string ExternalApiKick = "external_api_kick";
 
     // User 任务（新增）
     public const string UserJoinSubscribe = "user_join_subscribe";
     public const string UserChatActive = "user_chat_active";
+    public const string ChannelInviteUsers = "channel_invite_users";
+    public const string GroupInviteUsers = "group_invite_users";
     public const string ChannelGroupPrivateCreate = "channel_group_private_create";
     public const string ChannelGroupPublicize = "channel_group_publicize";
 

@@ -363,10 +363,10 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="channelInvite.visible" title="邀请成员" width="560px">
+    <el-dialog v-model="channelInvite.visible" title="邀请成员" width="640px">
       <el-form label-position="top">
         <el-alert
-          :title="`将使用执行账号邀请用户加入所选${kindName}；自动选择时按${kindName}创建账号执行。`"
+          title="可以使用单个账号，也可以选择账号分组轮询执行，降低单账号连续邀请触发风控的概率。"
           type="warning"
           :closable="false"
           show-icon
@@ -379,11 +379,24 @@
           </el-select>
           <el-button type="danger" plain :disabled="!channelInvite.presetName" @click="deleteInvitePreset">删除预设</el-button>
         </div>
-        <el-form-item label="执行账号">
-          <el-select v-model="channelInvite.accountId" class="full">
-            <el-option :label="`每个${kindName}创建账号（默认）`" :value="0" />
+        <el-form-item label="执行账号来源">
+          <el-radio-group v-model="channelInvite.accountMode">
+            <el-radio-button label="auto">自动</el-radio-button>
+            <el-radio-button label="account">单账号</el-radio-button>
+            <el-radio-button label="category">账号分组轮询</el-radio-button>
+          </el-radio-group>
+          <div v-if="channelInvite.accountMode === 'auto'" class="muted mt-2">自动模式会按每个{{ kindName }}的创建账号/可执行账号处理。</div>
+        </el-form-item>
+        <el-form-item v-if="channelInvite.accountMode === 'account'" label="执行账号">
+          <el-select v-model="channelInvite.accountId" class="full" filterable>
             <el-option v-for="account in accounts" :key="account.id" :label="accountLabel(account)" :value="account.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="channelInvite.accountMode === 'category'" label="账号分组">
+          <el-select v-model="channelInvite.accountCategoryId" class="full" filterable>
+            <el-option v-for="category in accountCategoryOptions" :key="category.id" :label="category.label" :value="category.id" />
+          </el-select>
+          <div class="muted mt-2">任务会在该分组的可操作账号中按顺序轮询，每次邀请切换一个账号。</div>
         </el-form-item>
         <el-form-item label="用户名列表">
           <el-input v-model="channelInvite.usernamesText" type="textarea" :rows="7" placeholder="每行一个 username 或 @username" />
@@ -590,7 +603,9 @@ const channelInvite = reactive({
   visible: false,
   running: false,
   ids: [] as number[],
+  accountMode: 'auto' as 'auto' | 'account' | 'category',
   accountId: 0,
+  accountCategoryId: 0,
   presetName: '',
   presetNameToSave: '',
   usernamesText: '',
@@ -631,6 +646,22 @@ const channelKick = reactive({
 
 const selectedIds = computed(() => selectedRows.value.map((x) => x.id))
 const selectionText = computed(() => selectionMode === 'select' ? '全选本页' : selectionMode === 'invert' ? '反选本页' : '清空选择')
+const accountCategoryOptions = computed(() => {
+  const grouped = new Map<number, { id: number; name: string; count: number }>()
+  for (const account of accounts.value) {
+    if (!account.categoryId || account.categoryId <= 0) continue
+    const item = grouped.get(account.categoryId) || {
+      id: account.categoryId,
+      name: account.categoryName || `分组 #${account.categoryId}`,
+      count: 0,
+    }
+    item.count += 1
+    grouped.set(account.categoryId, item)
+  }
+  return Array.from(grouped.values())
+    .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'))
+    .map((x) => ({ id: x.id, label: `${x.name}（${x.count} 个账号）` }))
+})
 const transferExecutorLabel = computed(() => {
   const id = transferOwner.row?.creatorAccountId
   if (!id) return '请选择当前创建者账号'
@@ -1224,7 +1255,9 @@ async function deleteAdminPreset() {
 
 function openChatInvite(ids: number[]) {
   channelInvite.ids = ids
+  channelInvite.accountMode = filters.accountId > 0 ? 'account' : 'auto'
   channelInvite.accountId = filters.accountId > 0 ? filters.accountId : 0
+  channelInvite.accountCategoryId = accountCategoryOptions.value[0]?.id || 0
   channelInvite.presetName = ''
   channelInvite.presetNameToSave = ''
   channelInvite.usernamesText = ''
@@ -1238,19 +1271,28 @@ async function submitChannelInvite() {
     ElMessage.warning('请填写用户名')
     return
   }
+  if (channelInvite.accountMode === 'account' && channelInvite.accountId <= 0) {
+    ElMessage.warning('请选择执行账号')
+    return
+  }
+  if (channelInvite.accountMode === 'category' && channelInvite.accountCategoryId <= 0) {
+    ElMessage.warning('请选择账号分组')
+    return
+  }
   channelInvite.running = true
   try {
     const payload = {
       ids: channelInvite.ids,
       usernames,
-      accountId: channelInvite.accountId || null,
+      accountId: channelInvite.accountMode === 'account' ? channelInvite.accountId : null,
+      accountCategoryId: channelInvite.accountMode === 'category' ? channelInvite.accountCategoryId : null,
       delayMs: channelInvite.delayMs,
     }
     const result = props.kind === 'channel'
       ? await panelApi.batchInviteChannels(payload)
       : await panelApi.batchInviteGroups(payload)
     channelInvite.visible = false
-    showBatchResult('邀请完成', result)
+    showTaskCreated('批量邀请任务已创建', result)
   } finally {
     channelInvite.running = false
   }
@@ -1386,6 +1428,20 @@ function showBatchResult(title: string, result: { success: number; failed: numbe
     .map((x) => `${x.phone || '-'}：${x.error || x.summary}`)
     .join('\n')
   ElMessageBox.alert(details || summary, `${title}：${summary}`, { type: 'warning' })
+}
+
+function showTaskCreated(title: string, task: { id: number; total: number }) {
+  ElMessageBox.confirm(
+    `任务 #${task.id} 已加入任务中心，共 ${task.total} 次邀请操作。可以在任务中心手动暂停或取消。`,
+    title,
+    {
+      type: 'success',
+      confirmButtonText: '查看任务中心',
+      cancelButtonText: '留在当前页',
+    },
+  )
+    .then(() => router.push('/tasks'))
+    .catch(() => undefined)
 }
 
 async function confirmAdminPassword(prompt: string, confirmText: string) {

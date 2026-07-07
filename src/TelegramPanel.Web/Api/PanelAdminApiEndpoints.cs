@@ -120,6 +120,7 @@ public static class PanelAdminApiEndpoints
         secured.MapGet("/version-info", GetVersionInfoAsync);
         secured.MapPost("/version-info/check", CheckVersionInfoAsync);
         secured.MapPost("/version-info/apply", ApplyVersionUpdateAsync);
+        secured.MapPost("/system/restart", RestartSystemAsync);
         secured.MapPost("/settings/telegram-api", SaveTelegramApiSettingsAsync);
         secured.MapPost("/settings/cloud-mail", SaveCloudMailSettingsAsync);
         secured.MapPost("/settings/cloud-mail/token", GenerateCloudMailTokenAsync);
@@ -2490,8 +2491,8 @@ public static class PanelAdminApiEndpoints
     private static async Task<IResult> BatchInviteChannelsAsync(
         ChannelUserBatchRequestDto request,
         ChannelManagementService channelManagement,
-        IChannelService channelService,
-        CancellationToken cancellationToken)
+        AccountManagementService accountManagement,
+        BatchTaskManagementService taskManagement)
     {
         var ids = NormalizeIds(request.Ids);
         var usernames = NormalizeUsernames(request.Usernames);
@@ -2500,56 +2501,51 @@ public static class PanelAdminApiEndpoints
         if (usernames.Count == 0)
             return Results.BadRequest(new OperationResultDto(false, "请填写用户名"));
 
-        var delayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000);
-        var results = new List<AccountOperationItemDto>();
+        var targets = new List<ChatInviteTargetItem>();
         foreach (var id in ids)
         {
             var channel = await channelManagement.GetChannelAsync(id);
-            if (channel == null)
+            if (channel != null)
             {
-                results.Add(new AccountOperationItemDto(id, null, false, "邀请失败", "频道不存在"));
-                continue;
-            }
-
-            var accountId = request.AccountId is > 0 ? request.AccountId : await channelManagement.ResolveExecuteAccountIdAsync(channel);
-            if (accountId is not > 0)
-            {
-                results.Add(new AccountOperationItemDto(id, channel.Title, false, "邀请失败", "该频道暂无可用执行账号"));
-                continue;
-            }
-
-            var success = 0;
-            var failures = new List<string>();
-            foreach (var username in usernames)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
+                targets.Add(new ChatInviteTargetItem
                 {
-                    var result = await channelService.InviteUserAsync(accountId.Value, channel.TelegramId, username);
-                    if (result.Success)
-                        success++;
-                    else
-                        failures.Add($"{username}: {result.Error ?? "失败"}");
-                }
-                catch (Exception ex)
-                {
-                    failures.Add($"{username}: {ex.Message}");
-                }
-
-                if (delayMs > 0)
-                    await Task.Delay(delayMs, cancellationToken);
+                    Id = channel.Id,
+                    TelegramId = channel.TelegramId,
+                    Title = channel.Title ?? channel.TelegramId.ToString()
+                });
             }
-
-            var ok = failures.Count == 0;
-            results.Add(new AccountOperationItemDto(
-                id,
-                channel.Title,
-                ok,
-                $"邀请成功 {success}/{usernames.Count}",
-                ok ? null : string.Join("；", failures.Take(10))));
         }
 
-        return Results.Ok(new AccountBatchOperationResultDto(results.Count(x => x.Success), results.Count(x => !x.Success), results));
+        if (targets.Count == 0)
+            return Results.BadRequest(new OperationResultDto(false, "未找到可邀请的频道"));
+
+        var accountScope = await ResolveInviteExecuteAccountScopeAsync(
+            request.AccountId,
+            request.AccountCategoryId,
+            accountManagement);
+
+        var config = new BatchInviteTaskConfig
+        {
+            AccountId = accountScope.PrimaryAccountId,
+            AccountCategoryId = accountScope.CategoryId,
+            AccountScopeName = accountScope.ScopeName,
+            ExecuteAccountIds = accountScope.AccountIds,
+            DelayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000),
+            Usernames = usernames.ToList(),
+            Targets = targets,
+            RequestedAtUtc = DateTime.UtcNow
+        };
+
+        var task = await taskManagement.CreateTaskAsync(new BatchTask
+        {
+            TaskType = BatchTaskTypes.ChannelInviteUsers,
+            Total = config.Targets.Count * config.Usernames.Count,
+            Completed = 0,
+            Failed = 0,
+            Config = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })
+        });
+
+        return Results.Ok(ToDto(task));
     }
 
     private static async Task<IResult> BatchSetChannelAdminsAsync(
@@ -2669,8 +2665,8 @@ public static class PanelAdminApiEndpoints
     private static async Task<IResult> BatchInviteGroupsAsync(
         ChannelUserBatchRequestDto request,
         GroupManagementService groupManagement,
-        IGroupService groupService,
-        CancellationToken cancellationToken)
+        AccountManagementService accountManagement,
+        BatchTaskManagementService taskManagement)
     {
         var ids = NormalizeIds(request.Ids);
         var usernames = NormalizeUsernames(request.Usernames);
@@ -2679,56 +2675,51 @@ public static class PanelAdminApiEndpoints
         if (usernames.Count == 0)
             return Results.BadRequest(new OperationResultDto(false, "请填写用户名"));
 
-        var delayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000);
-        var results = new List<AccountOperationItemDto>();
+        var targets = new List<ChatInviteTargetItem>();
         foreach (var id in ids)
         {
             var group = await groupManagement.GetGroupAsync(id);
-            if (group == null)
+            if (group != null)
             {
-                results.Add(new AccountOperationItemDto(id, null, false, "邀请失败", "群组不存在"));
-                continue;
-            }
-
-            var accountId = request.AccountId is > 0 ? request.AccountId : await groupManagement.ResolveExecuteAccountIdAsync(group);
-            if (accountId is not > 0)
-            {
-                results.Add(new AccountOperationItemDto(id, group.Title, false, "邀请失败", "该群组暂无可用执行账号"));
-                continue;
-            }
-
-            var success = 0;
-            var failures = new List<string>();
-            foreach (var username in usernames)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
+                targets.Add(new ChatInviteTargetItem
                 {
-                    var result = await groupService.InviteUserAsync(accountId.Value, group.TelegramId, username);
-                    if (result.Success)
-                        success++;
-                    else
-                        failures.Add($"{username}: {result.Error ?? "失败"}");
-                }
-                catch (Exception ex)
-                {
-                    failures.Add($"{username}: {ex.Message}");
-                }
-
-                if (delayMs > 0)
-                    await Task.Delay(delayMs, cancellationToken);
+                    Id = group.Id,
+                    TelegramId = group.TelegramId,
+                    Title = group.Title ?? group.TelegramId.ToString()
+                });
             }
-
-            var ok = failures.Count == 0;
-            results.Add(new AccountOperationItemDto(
-                id,
-                group.Title,
-                ok,
-                $"邀请成功 {success}/{usernames.Count}",
-                ok ? null : string.Join("；", failures.Take(10))));
         }
 
-        return Results.Ok(new AccountBatchOperationResultDto(results.Count(x => x.Success), results.Count(x => !x.Success), results));
+        if (targets.Count == 0)
+            return Results.BadRequest(new OperationResultDto(false, "未找到可邀请的群组"));
+
+        var accountScope = await ResolveInviteExecuteAccountScopeAsync(
+            request.AccountId,
+            request.AccountCategoryId,
+            accountManagement);
+
+        var config = new BatchInviteTaskConfig
+        {
+            AccountId = accountScope.PrimaryAccountId,
+            AccountCategoryId = accountScope.CategoryId,
+            AccountScopeName = accountScope.ScopeName,
+            ExecuteAccountIds = accountScope.AccountIds,
+            DelayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000),
+            Usernames = usernames.ToList(),
+            Targets = targets,
+            RequestedAtUtc = DateTime.UtcNow
+        };
+
+        var task = await taskManagement.CreateTaskAsync(new BatchTask
+        {
+            TaskType = BatchTaskTypes.GroupInviteUsers,
+            Total = config.Targets.Count * config.Usernames.Count,
+            Completed = 0,
+            Failed = 0,
+            Config = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })
+        });
+
+        return Results.Ok(ToDto(task));
     }
 
     private static async Task<IResult> BatchSetGroupAdminsAsync(
@@ -3524,9 +3515,7 @@ public static class PanelAdminApiEndpoints
         BotChannelInviteRequestDto request,
         BotManagementService botManagement,
         AccountManagementService accountManagement,
-        BotTelegramService botTelegram,
-        IChannelService channelService,
-        CancellationToken cancellationToken)
+        BatchTaskManagementService taskManagement)
     {
         if (request.BotId <= 0)
             return Results.BadRequest(new OperationResultDto(false, "请先选择机器人"));
@@ -3545,67 +3534,83 @@ public static class PanelAdminApiEndpoints
         if (channels.Count == 0)
             return Results.BadRequest(new OperationResultDto(false, "未找到可操作的 Bot 频道"));
 
-        var accountsByUserId = (await accountManagement.GetActiveAccountsAsync())
-            .Where(x => x.UserId > 0 && x.Category?.ExcludeFromOperations != true)
-            .GroupBy(x => x.UserId)
-            .ToDictionary(x => x.Key, x => x.First());
-        var selectedAccount = request.SelectedAccountId > 0
-            ? await accountManagement.GetAccountAsync(request.SelectedAccountId)
-            : null;
-        var delayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000);
-        var results = new List<AccountOperationItemDto>();
+        var accountScope = await ResolveInviteExecuteAccountScopeAsync(
+            request.SelectedAccountId,
+            request.AccountCategoryId,
+            accountManagement);
 
-        foreach (var channel in channels)
+        var config = new BatchInviteTaskConfig
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var (executorId, reason) = await ResolveBotChannelInviteExecutorAsync(
-                request.BotId,
-                channel.TelegramId,
-                request.SelectedAccountId,
-                selectedAccount,
-                accountsByUserId,
-                botTelegram,
-                cancellationToken);
-
-            if (executorId is not > 0)
-            {
-                results.Add(new AccountOperationItemDto(channel.Id, channel.Title, false, "邀请失败", reason ?? "无可用执行账号"));
-                continue;
-            }
-
-            var success = 0;
-            var failures = new List<string>();
-            foreach (var username in usernames)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                try
+            BotId = request.BotId,
+            SelectedAccountId = accountScope.PrimaryAccountId,
+            AccountId = accountScope.PrimaryAccountId,
+            AccountCategoryId = accountScope.CategoryId,
+            AccountScopeName = accountScope.ScopeName,
+            ExecuteAccountIds = accountScope.AccountIds,
+            DelayMs = Math.Clamp(request.DelayMs ?? 2000, 0, 30000),
+            Usernames = usernames.ToList(),
+            Targets = channels
+                .Select(x => new ChatInviteTargetItem
                 {
-                    var result = await channelService.InviteUserAsync(executorId.Value, channel.TelegramId, username);
-                    if (result.Success)
-                        success++;
-                    else
-                        failures.Add($"{username}: {result.Error ?? "失败"}");
-                }
-                catch (Exception ex)
-                {
-                    failures.Add($"{username}: {ex.Message}");
-                }
+                    Id = x.Id,
+                    TelegramId = x.TelegramId,
+                    Title = x.Title ?? x.TelegramId.ToString()
+                })
+                .ToList(),
+            RequestedAtUtc = DateTime.UtcNow
+        };
 
-                if (delayMs > 0)
-                    await Task.Delay(delayMs, cancellationToken);
-            }
+        var task = await taskManagement.CreateTaskAsync(new BatchTask
+        {
+            TaskType = BatchTaskTypes.BotChannelInviteUsers,
+            Total = config.Targets.Count * config.Usernames.Count,
+            Completed = 0,
+            Failed = 0,
+            Config = JsonSerializer.Serialize(config, new JsonSerializerOptions { WriteIndented = true })
+        });
 
-            var ok = failures.Count == 0;
-            results.Add(new AccountOperationItemDto(
-                channel.Id,
-                channel.Title,
-                ok,
-                $"邀请成功 {success}/{usernames.Count}",
-                ok ? null : string.Join("；", failures.Take(10))));
+        return Results.Ok(ToDto(task));
+    }
+
+    private static async Task<InviteExecuteAccountScope> ResolveInviteExecuteAccountScopeAsync(
+        int? accountId,
+        int? accountCategoryId,
+        AccountManagementService accountManagement)
+    {
+        if (accountId is > 0)
+        {
+            var account = await accountManagement.GetAccountAsync(accountId.Value);
+            return account is { IsActive: true } && account.Category?.ExcludeFromOperations != true
+                ? new InviteExecuteAccountScope(account.Id, account.CategoryId, AccountScopeLabel(account), new List<int> { account.Id })
+                : new InviteExecuteAccountScope(accountId.Value, null, $"账号 {accountId.Value}", new List<int>());
         }
 
-        return Results.Ok(new AccountBatchOperationResultDto(results.Count(x => x.Success), results.Count(x => !x.Success), results));
+        if (accountCategoryId is > 0)
+        {
+            var accounts = (await accountManagement.GetAccountsByCategoryAsync(accountCategoryId.Value))
+                .Where(x => x.IsActive && x.Category?.ExcludeFromOperations != true)
+                .OrderBy(x => x.Id)
+                .ToList();
+            var scopeName = accounts.FirstOrDefault()?.Category?.Name;
+            if (string.IsNullOrWhiteSpace(scopeName))
+                scopeName = $"账号分组 #{accountCategoryId.Value}";
+
+            return new InviteExecuteAccountScope(
+                0,
+                accountCategoryId.Value,
+                scopeName,
+                accounts.Select(x => x.Id).ToList());
+        }
+
+        return new InviteExecuteAccountScope(0, null, "自动选择", new List<int>());
+    }
+
+    private static string AccountScopeLabel(Account account)
+    {
+        var phone = account.DisplayPhone;
+        if (string.IsNullOrWhiteSpace(phone))
+            phone = account.Phone;
+        return string.IsNullOrWhiteSpace(phone) ? $"账号 {account.Id}" : phone;
     }
 
     private static async Task<IResult> GetChannelInvitePresetsAsync(
@@ -4265,11 +4270,24 @@ public static class PanelAdminApiEndpoints
                 return Results.Ok(new ModuleOperationResultDto(true, $"已上传：{moduleId} {version}，但启用失败：{enable.Message}", moduleId, version));
 
             message = $"已上传并启用：{moduleId} {version}";
-            if (autoRestart)
-                restart.RequestRestart(TimeSpan.FromSeconds(1), $"module install {moduleId} {version}");
+        }
+
+        if (autoRestart)
+        {
+            var scheduled = restart.RequestRestart(TimeSpan.FromSeconds(1), $"module install {result.ModuleId} {result.Version}");
+            message += scheduled ? "，已请求重启服务" : "，重启请求已在等待执行";
         }
 
         return Results.Ok(new ModuleOperationResultDto(true, message, result.ModuleId, result.Version));
+    }
+
+    private static Task<IResult> RestartSystemAsync(AppRestartService restart)
+    {
+        var scheduled = restart.RequestRestart(TimeSpan.FromSeconds(1), "manual restart from panel");
+        var message = scheduled
+            ? "已提交重启请求，服务将在约 1 秒后退出；Docker、系统服务或桌面版守护进程会负责重新拉起。"
+            : "已有重启请求正在等待执行。";
+        return Task.FromResult<IResult>(Results.Ok(new SystemRestartResultDto(true, message, scheduled)));
     }
 
     private static async Task<IResult> EnableModuleAsync(
@@ -4443,7 +4461,7 @@ public static class PanelAdminApiEndpoints
                 x.Item.Definition.Order,
                 x.Item.Module.Id,
                 null,
-                "legacy")));
+                "direct")));
 
         items.AddRange(contributions.Pages
             .OrderBy(x => x.Definition.Group ?? "", StringComparer.OrdinalIgnoreCase)
@@ -4764,7 +4782,7 @@ public static class PanelAdminApiEndpoints
             channel.MemberCount);
 
     private static OperationAccountDto ToOperationAccountDto(Account account) =>
-        new(account.Id, account.DisplayPhone, account.Nickname, account.Username, account.IsActive, account.CategoryId);
+        new(account.Id, account.DisplayPhone, account.Nickname, account.Username, account.IsActive, account.CategoryId, account.Category?.Name);
 
     private static ChatAdminDto ToDto(ChannelAdminInfo admin) =>
         new(
@@ -6079,6 +6097,7 @@ public static class PanelAdminApiEndpoints
 public sealed record LoginRequestDto(string? Username, string? Password);
 public sealed record AuthMeDto(bool Authenticated, string? Username, bool MustChangePassword, bool AuthEnabled, string Version);
 public sealed record OperationResultDto(bool Success, string? Message);
+public sealed record SystemRestartResultDto(bool Success, string? Message, bool RestartScheduled);
 public sealed record PagedResultDto<T>(IReadOnlyList<T> Items, int Total, int Page, int PageSize);
 public sealed record DashboardSummaryDto(
     int AccountCount,
@@ -6178,6 +6197,12 @@ public sealed record AccountBatchOperationResultDto(
     int Success,
     int Failed,
     IReadOnlyList<AccountOperationItemDto> Items);
+
+public sealed record InviteExecuteAccountScope(
+    int PrimaryAccountId,
+    int? CategoryId,
+    string ScopeName,
+    List<int> AccountIds);
 
 public sealed record RiskAccountDto(
     int Id,
@@ -6538,7 +6563,8 @@ public sealed record OperationAccountDto(
     string? Nickname,
     string? Username,
     bool IsActive,
-    int? CategoryId);
+    int? CategoryId,
+    string? CategoryName);
 
 public sealed record SimpleCategoryDto(
     int Id,
@@ -6644,6 +6670,7 @@ public sealed record ChannelUserBatchRequestDto(
     IReadOnlyList<int> Ids,
     IReadOnlyList<string> Usernames,
     int? AccountId,
+    int? AccountCategoryId,
     int? DelayMs);
 public sealed record ChannelAdminBatchRequestDto(
     IReadOnlyList<int> Ids,
@@ -6724,6 +6751,7 @@ public sealed record BotChannelInviteRequestDto(
     IReadOnlyList<int> Ids,
     IReadOnlyList<string> Usernames,
     int SelectedAccountId,
+    int? AccountCategoryId,
     int? DelayMs);
 public sealed record BotAdminsByAccountTaskRequestDto(
     int BotId,

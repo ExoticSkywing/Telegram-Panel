@@ -17,10 +17,10 @@ public sealed class AppRestartService
 
     public bool RestartPending => Volatile.Read(ref _requested) != 0;
 
-    public void RequestRestart(TimeSpan? delay = null, string? reason = null)
+    public bool RequestRestart(TimeSpan? delay = null, string? reason = null)
     {
         if (Interlocked.Exchange(ref _requested, 1) != 0)
-            return;
+            return false;
 
         delay ??= TimeSpan.FromSeconds(1);
         _logger.LogWarning("Restart requested: {Reason}. Stop in {DelayMs}ms", reason ?? "-", (int)delay.Value.TotalMilliseconds);
@@ -38,6 +38,7 @@ public sealed class AppRestartService
 
             _lifetime.StopApplication();
         });
+
+        return true;
     }
 }
-

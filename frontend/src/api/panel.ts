@@ -68,6 +68,7 @@ import type {
   TwoFactorRecoveryEmailStatus,
   VersionApplyResult,
   VersionInfo,
+  SystemRestartResult,
   NumberPreset,
   TextPreset,
 } from './types'
@@ -259,6 +260,8 @@ export const panelApi = {
   checkVersionInfo: () => api.post<VersionInfo>('/version-info/check').then((r) => r.data),
   applyVersionUpdate: () =>
     api.post<VersionApplyResult>('/version-info/apply', {}, { timeout: 300_000 }).then((r) => r.data),
+  restartPanel: () =>
+    api.post<SystemRestartResult>('/system/restart').then((r) => r.data),
 
   tasks: (count = 50) => api.get<TaskCenter>('/tasks', { params: { count } }).then((r) => r.data),
   task: (id: number) => api.get<BatchTask>(`/tasks/${id}`).then((r) => r.data),
@@ -355,8 +358,8 @@ export const panelApi = {
     api.post<OperationResult>('/channels/batch/group', { ids, categoryId }).then((r) => r.data),
   batchDeleteChannels: (ids: number[]) =>
     api.post<OperationResult>('/channels/batch/delete', { ids }).then((r) => r.data),
-  batchInviteChannels: (payload: { ids: number[]; usernames: string[]; accountId?: number | null; delayMs?: number | null }) =>
-    api.post<AccountBatchOperationResult>('/channels/batch/invite', payload, { timeout: 300_000 }).then((r) => r.data),
+  batchInviteChannels: (payload: { ids: number[]; usernames: string[]; accountId?: number | null; accountCategoryId?: number | null; delayMs?: number | null }) =>
+    api.post<BatchTask>('/channels/batch/invite', payload).then((r) => r.data),
   batchSetChannelAdmins: (payload: {
     ids: number[]
     usernames: string[]
@@ -417,8 +420,8 @@ export const panelApi = {
     api.post<OperationResult>('/groups/batch/category', { ids, categoryId }).then((r) => r.data),
   batchDeleteGroups: (ids: number[]) =>
     api.post<OperationResult>('/groups/batch/delete', { ids }).then((r) => r.data),
-  batchInviteGroups: (payload: { ids: number[]; usernames: string[]; accountId?: number | null; delayMs?: number | null }) =>
-    api.post<AccountBatchOperationResult>('/groups/batch/invite', payload, { timeout: 300_000 }).then((r) => r.data),
+  batchInviteGroups: (payload: { ids: number[]; usernames: string[]; accountId?: number | null; accountCategoryId?: number | null; delayMs?: number | null }) =>
+    api.post<BatchTask>('/groups/batch/invite', payload).then((r) => r.data),
   batchSetGroupAdmins: (payload: {
     ids: number[]
     usernames: string[]
@@ -487,8 +490,8 @@ export const panelApi = {
     api.post<OperationResult>('/bot-channels/batch/delete', { ids, botIds: botIds || [] }).then((r) => r.data),
   checkBotChannelStatus: (botId: number, ids: number[]) =>
     api.post<BotChannelStatusResult>('/bot-channels/batch/status', { botId, ids }, { timeout: 180_000 }).then((r) => r.data),
-  inviteBotChannelMembers: (payload: { botId: number; ids: number[]; usernames: string[]; selectedAccountId: number; delayMs?: number | null }) =>
-    api.post<AccountBatchOperationResult>('/bot-channels/batch/invite', payload, { timeout: 300_000 }).then((r) => r.data),
+  inviteBotChannelMembers: (payload: { botId: number; ids: number[]; usernames: string[]; selectedAccountId: number; accountCategoryId?: number | null; delayMs?: number | null }) =>
+    api.post<BatchTask>('/bot-channels/batch/invite', payload).then((r) => r.data),
   banBotChannelMembers: (payload: {
     botId: number
     ids: number[]

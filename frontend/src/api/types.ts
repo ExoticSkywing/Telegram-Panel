@@ -11,6 +11,10 @@ export interface OperationResult {
   message?: string | null
 }
 
+export interface SystemRestartResult extends OperationResult {
+  restartScheduled: boolean
+}
+
 export interface PagedResult<T> {
   items: T[]
   total: number
@@ -599,6 +603,7 @@ export interface OperationAccount {
   username?: string | null
   isActive: boolean
   categoryId?: number | null
+  categoryName?: string | null
 }
 
 export interface SimpleCategory {
