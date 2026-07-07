@@ -272,6 +272,8 @@ export const panelApi = {
   scheduledTask: (id: number) => api.get<ScheduledTask>(`/scheduled-tasks/${id}`).then((r) => r.data),
   updateScheduledTask: (id: number, payload: UpdateScheduledTaskRequest) =>
     api.put<ScheduledTask>(`/scheduled-tasks/${id}`, payload).then((r) => r.data),
+  runScheduledTaskNow: (id: number) =>
+    api.post<BatchTask>(`/scheduled-tasks/${id}/run-now`).then((r) => r.data),
   cleanupTasks: (mode: 'history' | 'all') =>
     api.post<OperationResult>('/tasks/cleanup', { mode }).then((r) => r.data),
   pauseTask: (id: number) => api.post<OperationResult>(`/tasks/${id}/pause`).then((r) => r.data),

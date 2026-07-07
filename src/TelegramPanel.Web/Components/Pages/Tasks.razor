@@ -106,6 +106,8 @@
                 <MudTd DataLabel="操作">
                     <MudIconButton Icon="@Icons.Material.Filled.Info" Size="Size.Small" Color="Color.Info"
                                    OnClick="@(() => ShowScheduledTaskDetails(context))" />
+                    <MudIconButton Icon="@Icons.Material.Filled.PlayCircle" Size="Size.Small" Color="Color.Success"
+                                   OnClick="@(() => RunScheduledTaskNow(context))" />
                     <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" Color="Color.Primary"
                                    OnClick="@(() => OpenEditScheduledTask(context))" />
                     @if (string.Equals(context.Status, ScheduledTaskStatuses.Enabled, StringComparison.OrdinalIgnoreCase))
@@ -1506,6 +1508,34 @@
         catch (Exception ex)
         {
             Snackbar.Add($"恢复失败：{ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task RunScheduledTaskNow(ScheduledTask task)
+    {
+        bool? result = await DialogService.ShowMessageBox(
+            "确认立即执行",
+            $"将立即按计划任务 #{task.Id} 的当前配置创建一条执行任务，用于测试 Cron 配置效果。原计划仍会按下次运行时间继续调度，是否继续？",
+            yesText: "立即执行", cancelText: "取消");
+
+        if (result != true)
+            return;
+
+        try
+        {
+            var created = await ScheduledTaskManagement.RunNowAsync(task.Id);
+            if (created == null)
+            {
+                Snackbar.Add("计划任务不存在或已被删除", Severity.Warning);
+                return;
+            }
+
+            await LoadTasks();
+            Snackbar.Add($"已创建执行任务 #{created.Id}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"立即执行失败：{ex.Message}", Severity.Error);
         }
     }
 

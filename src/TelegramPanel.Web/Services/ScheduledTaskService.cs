@@ -11,17 +11,20 @@ public sealed class ScheduledTaskService
 {
     private readonly IScheduledTaskRepository _scheduledTaskRepository;
     private readonly CronExpressionService _cronExpressionService;
+    private readonly BatchTaskManagementService _batchTaskManagement;
     private readonly PanelTimeZoneService _timeZone;
     private readonly ImageAssetStorageService _assetStorage;
 
     public ScheduledTaskService(
         IScheduledTaskRepository scheduledTaskRepository,
         CronExpressionService cronExpressionService,
+        BatchTaskManagementService batchTaskManagement,
         PanelTimeZoneService timeZone,
         ImageAssetStorageService assetStorage)
     {
         _scheduledTaskRepository = scheduledTaskRepository;
         _cronExpressionService = cronExpressionService;
+        _batchTaskManagement = batchTaskManagement;
         _timeZone = timeZone;
         _assetStorage = assetStorage;
     }
@@ -136,6 +139,38 @@ public sealed class ScheduledTaskService
         }
 
         return updated;
+    }
+
+    public async Task<BatchTask?> RunNowAsync(int id, CancellationToken cancellationToken = default)
+    {
+        var scheduledTask = await _scheduledTaskRepository.GetByIdAsync(id);
+        if (scheduledTask == null)
+            return null;
+
+        if (scheduledTask.LastBatchTaskId.HasValue)
+        {
+            var lastBatchTask = await _batchTaskManagement.GetTaskAsync(scheduledTask.LastBatchTaskId.Value);
+            if (lastBatchTask?.Status is "pending" or "running" or "paused")
+                throw new InvalidOperationException("上次执行任务尚未结束，请等待完成或取消后再手动执行");
+        }
+
+        var created = await _batchTaskManagement.CreateTaskAsync(new BatchTask
+        {
+            TaskType = scheduledTask.TaskType,
+            Total = Math.Max(0, scheduledTask.Total),
+            Completed = 0,
+            Failed = 0,
+            Config = TaskAssetScopeHelper.RemoveAssetScopeId(scheduledTask.ConfigJson)
+        });
+
+        var nowUtc = DateTime.UtcNow;
+        scheduledTask.LastRunAtUtc = nowUtc;
+        scheduledTask.LastBatchTaskId = created.Id;
+        scheduledTask.UpdatedAt = nowUtc;
+        scheduledTask.NextRunAtUtc = GetNextRunAtUtc(scheduledTask.CronExpression, nowUtc);
+        await _scheduledTaskRepository.UpdateAsync(scheduledTask);
+
+        return created;
     }
 
     public string ValidateCronOrThrow(string expression)

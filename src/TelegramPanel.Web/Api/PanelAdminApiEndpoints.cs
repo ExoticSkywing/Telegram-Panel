@@ -249,6 +249,7 @@ public static class PanelAdminApiEndpoints
         secured.MapGet("/scheduled-tasks/{id:int}", GetScheduledTaskAsync);
         secured.MapPost("/scheduled-tasks", CreateScheduledTaskAsync);
         secured.MapPut("/scheduled-tasks/{id:int}", UpdateScheduledTaskAsync);
+        secured.MapPost("/scheduled-tasks/{id:int}/run-now", RunScheduledTaskNowAsync);
         secured.MapPost("/scheduled-tasks/{id:int}/pause", async (int id, ScheduledTaskService scheduledTasks) =>
         {
             await scheduledTasks.PauseAsync(id);
@@ -3838,6 +3839,24 @@ public static class PanelAdminApiEndpoints
 
         var updated = await scheduledTasks.UpdateAsync(task);
         return Results.Ok(ToDto(updated));
+    }
+
+    private static async Task<IResult> RunScheduledTaskNowAsync(
+        int id,
+        ScheduledTaskService scheduledTasks,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var created = await scheduledTasks.RunNowAsync(id, cancellationToken);
+            return created == null
+                ? Results.NotFound(new OperationResultDto(false, "计划任务不存在或已被删除"))
+                : Results.Ok(ToDto(created));
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Results.BadRequest(new OperationResultDto(false, ex.Message));
+        }
     }
 
     private static async Task<IResult> CleanupTasksAsync(

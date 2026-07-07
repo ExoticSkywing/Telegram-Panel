@@ -53,10 +53,11 @@
         <el-table-column label="上次运行" width="180">
           <template #default="{ row }">{{ formatTime(row.lastRunAtUtc) || '-' }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="210" fixed="right">
+        <el-table-column label="操作" width="240" fixed="right">
           <template #default="{ row }">
             <div class="icon-actions">
               <el-button link type="primary" :icon="InfoFilled" title="详情" @click="showScheduledDetails(row)" />
+              <el-button link type="success" :icon="VideoPlay" title="立即执行" @click="runScheduledNow(row)" />
               <el-button link type="primary" :icon="Edit" title="编辑" @click="openEditScheduled(row)" />
               <el-button v-if="row.status === 'enabled'" link type="warning" :icon="VideoPause" title="暂停" @click="pauseScheduled(row.id)" />
               <el-button v-else link type="success" :icon="VideoPlay" title="恢复" @click="resumeScheduled(row.id)" />
@@ -861,6 +862,17 @@ async function rerunTask(task: BatchTask) {
     total: Math.max(0, fullTask.total),
     config: fullTask.config || null,
   })
+  await load()
+}
+
+async function runScheduledNow(task: ScheduledTask) {
+  await ElMessageBox.confirm(
+    `将立即按计划任务 #${task.id} 的当前配置创建一条执行任务，用于测试 Cron 配置效果。原计划仍会按下次运行时间继续调度，是否继续？`,
+    '确认立即执行',
+    { type: 'warning' },
+  )
+  const created = await panelApi.runScheduledTaskNow(task.id)
+  ElMessage.success(`已创建执行任务 #${created.id}`)
   await load()
 }
 
