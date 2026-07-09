@@ -1048,6 +1048,7 @@ function stripRuntimeFields(config: string) {
   const obj = parseJsonObject(config)
   if (!obj) return config
   delete obj.recent_failures
+  delete obj.RecentFailures
   return JSON.stringify(obj, null, 2)
 }
 
@@ -1064,18 +1065,22 @@ function buildReadableConfigDetails(taskType: string, config: string) {
 }
 
 function buildPrivateCreateDetails(obj: Record<string, any>) {
-  const createType = String(obj.create_type || 'channel')
+  const createType = String(obj.create_type || obj.CreateType || 'channel')
   const lines = [
     `账号分类: ${buildSelectedCategorySummary(obj)}`,
     `创建对象: ${objectTypeName(createType)}`,
     `${createType === 'group' ? '群组分类' : '频道分组'}: ${chatGroupName(obj, createType)}`,
-    `每账号累计创建上限: ${formatNumberValue(obj.system_created_limit, 10)}`,
-    `本轮每账号创建数: ${formatNumberValue(obj.per_account_batch_size, 1)}`,
-    `间隔: ${formatSecondsValue(obj.min_delay_seconds)} ~ ${formatSecondsValue(obj.max_delay_seconds)} 秒`,
-    `时间抖动: ${formatNumberValue(obj.jitter_percent, 0)}%`,
-    `标题模板: ${formatTextValue(obj.title_template)}`,
-    `头像来源: ${avatarSourceName(obj.avatar_source, obj)}`,
+    `每账号累计创建上限: ${formatNumberValue(obj.system_created_limit ?? obj.SystemCreatedLimit, 10)}`,
+    `本轮每账号创建数: ${formatNumberValue(obj.per_account_batch_size ?? obj.PerAccountBatchSize, 1)}`,
+    `间隔: ${formatSecondsValue(obj.min_delay_seconds ?? obj.MinDelaySeconds)} ~ ${formatSecondsValue(obj.max_delay_seconds ?? obj.MaxDelaySeconds)} 秒`,
+    `时间抖动: ${formatNumberValue(obj.jitter_percent ?? obj.JitterPercent, 0)}%`,
+    `标题模板: ${formatTextValue(obj.title_template ?? obj.TitleTemplate)}`,
+    `头像来源: ${avatarSourceName(obj.avatar_source ?? obj.AvatarSource, obj)}`,
   ]
+  const recentFailures = obj.recent_failures ?? obj.RecentFailures
+  if (Array.isArray(recentFailures) && recentFailures.length > 0) {
+    lines.push('', '最近失败原因:', ...recentFailures.map((item) => `- ${String(item)}`))
+  }
   return lines
 }
 

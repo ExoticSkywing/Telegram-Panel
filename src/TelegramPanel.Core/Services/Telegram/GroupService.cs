@@ -17,17 +17,20 @@ public class GroupService : IGroupService
     private readonly ITelegramClientPool _clientPool;
     private readonly AccountManagementService _accountManagement;
     private readonly IConfiguration _configuration;
+    private readonly AccountRiskService _riskService;
     private readonly ILogger<GroupService> _logger;
 
     public GroupService(
         ITelegramClientPool clientPool,
         AccountManagementService accountManagement,
         IConfiguration configuration,
+        AccountRiskService riskService,
         ILogger<GroupService> logger)
     {
         _clientPool = clientPool;
         _accountManagement = accountManagement;
         _configuration = configuration;
+        _riskService = riskService;
         _logger = logger;
     }
 
@@ -39,6 +42,7 @@ public class GroupService : IGroupService
 
     public async Task<GroupInfo> CreateGroupAsync(int accountId, string title, string about, bool isPublic = false, string? username = null)
     {
+        await _riskService.EnsureChatCreationAllowedAsync(accountId, _accountManagement);
         var client = await GetOrCreateConnectedClientAsync(accountId);
 
         _logger.LogInformation("Creating group '{Title}' for account {AccountId}", title, accountId);

@@ -67,6 +67,9 @@ public sealed class ChannelGroupPrivateCreateTaskConfig
 
     [JsonPropertyName("asset_scope_id")]
     public string? AssetScopeId { get; set; }
+
+    [JsonPropertyName("recent_failures")]
+    public List<string> RecentFailures { get; set; } = new();
 }
 
 public sealed class ChannelGroupPublicizeTaskConfig

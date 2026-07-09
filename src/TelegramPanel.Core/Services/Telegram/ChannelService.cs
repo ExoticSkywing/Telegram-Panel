@@ -16,17 +16,20 @@ public class ChannelService : IChannelService
     private readonly ITelegramClientPool _clientPool;
     private readonly AccountManagementService _accountManagement;
     private readonly IConfiguration _configuration;
+    private readonly AccountRiskService _riskService;
     private readonly ILogger<ChannelService> _logger;
 
     public ChannelService(
         ITelegramClientPool clientPool,
         AccountManagementService accountManagement,
         IConfiguration configuration,
+        AccountRiskService riskService,
         ILogger<ChannelService> logger)
     {
         _clientPool = clientPool;
         _accountManagement = accountManagement;
         _configuration = configuration;
+        _riskService = riskService;
         _logger = logger;
     }
 
@@ -334,6 +337,7 @@ public class ChannelService : IChannelService
 
     public async Task<ChannelInfo> CreateChannelAsync(int accountId, string title, string about, bool isPublic = false)
     {
+        await _riskService.EnsureChatCreationAllowedAsync(accountId, _accountManagement);
         var client = await GetOrCreateConnectedClientAsync(accountId);
 
         _logger.LogInformation("Creating channel '{Title}' for account {AccountId}", title, accountId);

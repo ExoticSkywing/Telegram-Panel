@@ -7,6 +7,18 @@
           <el-option v-for="account in accounts" :key="account.id" :label="accountLabel(account)" :value="account.id" />
         </el-select>
       </el-form-item>
+      <el-alert
+        v-if="selectedAccountCooldownBlocked"
+        :title="`该账号加入面板未满 24 小时，暂时不能创建${kindName}`"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="mb-3"
+      >
+        <div>为降低 Telegram 风控风险，请在冷却结束后再操作。</div>
+        <div class="cooldown-detail">剩余时间：{{ cooldownCountdown }}</div>
+        <div class="cooldown-detail">可重试时间：{{ cooldownRetryAt }}</div>
+      </el-alert>
       <el-form-item :label="`${kindName}分类`">
         <el-select v-model="form.categoryId" class="full">
           <el-option :label="kind === 'channel' ? '未分组' : '未分类'" :value="0" />
@@ -39,14 +51,21 @@
       />
       <el-form-item>
         <el-button @click="router.push(kind === 'channel' ? '/channels' : '/groups')">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submit">创建{{ kindName }}</el-button>
+        <el-button
+          type="primary"
+          :loading="saving"
+          :disabled="selectedAccountCooldownBlocked"
+          @click="submit"
+        >
+          创建{{ kindName }}
+        </el-button>
       </el-form-item>
     </el-form>
   </el-card>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { panelApi } from '@/api/panel'
@@ -61,6 +80,8 @@ const kindName = computed(() => (kind.value === 'channel' ? '频道' : '群组')
 const saving = ref(false)
 const accounts = ref<OperationAccount[]>([])
 const categories = ref<SimpleCategory[]>([])
+const nowMs = ref(Date.now())
+let countdownTimer: number | undefined
 const form = reactive({
   accountId: 0,
   categoryId: 0,
@@ -70,6 +91,37 @@ const form = reactive({
   username: '',
   allowForwarding: true,
 })
+
+const selectedAccount = computed(() => accounts.value.find((account) => account.id === form.accountId) || null)
+const cooldownAvailableAtMs = computed(() => {
+  const value = selectedAccount.value?.chatCreateAvailableAtUtc
+  if (!value) return null
+  const timestamp = new Date(value).getTime()
+  return Number.isNaN(timestamp) ? null : timestamp
+})
+const cooldownRemainingSeconds = computed(() => {
+  const availableAt = cooldownAvailableAtMs.value
+  if (availableAt == null) return 0
+  return Math.max(0, Math.ceil((availableAt - nowMs.value) / 1000))
+})
+const selectedAccountCooldownBlocked = computed(() => cooldownRemainingSeconds.value > 0)
+const cooldownCountdown = computed(() => formatCountdown(cooldownRemainingSeconds.value))
+const cooldownRetryAt = computed(() => {
+  const value = selectedAccount.value?.chatCreateAvailableAtUtc
+  if (!value) return '-'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? '-' : date.toLocaleString('zh-CN', { hour12: false })
+})
+
+function formatCountdown(totalSeconds: number) {
+  const seconds = Math.max(0, totalSeconds)
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const restSeconds = seconds % 60
+  if (hours > 0) return `${hours} 小时 ${minutes} 分 ${restSeconds} 秒`
+  if (minutes > 0) return `${minutes} 分 ${restSeconds} 秒`
+  return `${restSeconds} 秒`
+}
 
 function accountLabel(account: OperationAccount) {
   const name = account.nickname || account.displayPhone
@@ -82,6 +134,10 @@ async function loadMeta() {
 }
 
 async function submit(ignoreRiskWarning = false) {
+  if (selectedAccountCooldownBlocked.value) {
+    ElMessage.warning(`该账号加入面板未满 24 小时，请等待 ${cooldownCountdown.value} 后再创建${kindName.value}`)
+    return
+  }
   if (form.accountId <= 0) {
     ElMessage.warning('请选择账号')
     return
@@ -122,8 +178,16 @@ async function submit(ignoreRiskWarning = false) {
       router.push('/groups')
     }
   } catch (error: any) {
-    const message = error?.response?.data?.message || ''
-    if (!ignoreRiskWarning && message.includes('24 小时')) {
+    const data = error?.response?.data
+    const message = data?.message || ''
+    if (data?.code === 'CHAT_CREATE_COOLDOWN') {
+      const retryAt = data?.retryAtUtc ? new Date(data.retryAtUtc).getTime() : Number.NaN
+      if (selectedAccount.value && Number.isFinite(retryAt)) {
+        selectedAccount.value.chatCreateAvailableAtUtc = new Date(retryAt).toISOString()
+        selectedAccount.value.chatCreateCooldownRemainingSeconds = data?.retryAfterSeconds ?? null
+      }
+      ElMessage.warning(message || `该账号加入面板未满 24 小时，暂时不能创建${kindName.value}`)
+    } else if (!ignoreRiskWarning && message.includes('24 小时')) {
       const action = await showRiskWarning({ title: '风控警告', message })
       if (action === 'continue') await submit(true)
     } else if (message) {
@@ -136,7 +200,16 @@ async function submit(ignoreRiskWarning = false) {
   }
 }
 
-onMounted(loadMeta)
+onMounted(() => {
+  loadMeta()
+  countdownTimer = window.setInterval(() => {
+    nowMs.value = Date.now()
+  }, 1000)
+})
+
+onBeforeUnmount(() => {
+  if (countdownTimer != null) window.clearInterval(countdownTimer)
+})
 </script>
 
 <style scoped>
@@ -146,5 +219,10 @@ onMounted(loadMeta)
 
 .full {
   width: 100%;
+}
+
+.cooldown-detail {
+  margin-top: 4px;
+  font-weight: 600;
 }
 </style>
