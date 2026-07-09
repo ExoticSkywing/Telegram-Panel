@@ -16,7 +16,7 @@ api.interceptors.response.use(
     }
 
     const message = err?.response?.data?.message || err?.response?.data?.title || err?.message
-    if (message) ElMessage.error(message)
+    if (message && err?.response?.data?.code !== 'CHAT_CREATE_COOLDOWN') ElMessage.error(message)
     return Promise.reject(err)
   },
 )

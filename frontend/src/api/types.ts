@@ -9,6 +9,9 @@ export interface AuthMe {
 export interface OperationResult {
   success: boolean
   message?: string | null
+  code?: string | null
+  retryAtUtc?: string | null
+  retryAfterSeconds?: number | null
 }
 
 export interface PagedResult<T> {
@@ -599,6 +602,9 @@ export interface OperationAccount {
   username?: string | null
   isActive: boolean
   categoryId?: number | null
+  createdAt: string
+  chatCreateAvailableAtUtc?: string | null
+  chatCreateCooldownRemainingSeconds?: number | null
 }
 
 export interface SimpleCategory {

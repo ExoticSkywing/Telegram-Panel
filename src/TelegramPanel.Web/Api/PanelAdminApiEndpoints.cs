@@ -1804,13 +1804,15 @@ public static class PanelAdminApiEndpoints
         return Results.Ok(new OperationResultDto(true, "登录会话已释放"));
     }
 
-    private static async Task<IResult> GetOperationAccountsAsync(AccountManagementService accounts)
+    private static async Task<IResult> GetOperationAccountsAsync(
+        AccountManagementService accounts,
+        AccountRiskService riskService)
     {
         var items = (await accounts.GetAllAccountsAsync())
             .Where(x => x.Category?.ExcludeFromOperations != true)
             .OrderByDescending(x => x.IsActive)
             .ThenBy(x => x.DisplayPhone, StringComparer.OrdinalIgnoreCase)
-            .Select(ToOperationAccountDto)
+            .Select(x => ToOperationAccountDto(x, riskService))
             .ToList();
 
         return Results.Ok(items);
@@ -2240,6 +2242,17 @@ public static class PanelAdminApiEndpoints
         if (account == null)
             return Results.NotFound(new OperationResultDto(false, "账号不存在"));
 
+        var chatCreateCooldown = riskService.CheckChatCreationCooldown(account);
+        if (chatCreateCooldown.IsBlocked)
+        {
+            return Results.BadRequest(new OperationResultDto(
+                false,
+                chatCreateCooldown.Message,
+                chatCreateCooldown.Code,
+                chatCreateCooldown.AvailableAtUtc,
+                chatCreateCooldown.RetryAfterSeconds));
+        }
+
         if (!request.IgnoreRiskWarning)
         {
             var risk = riskService.CheckLoginDuration(account);
@@ -2294,6 +2307,17 @@ public static class PanelAdminApiEndpoints
         var account = await accountManagement.GetAccountAsync(request.AccountId);
         if (account == null)
             return Results.NotFound(new OperationResultDto(false, "账号不存在"));
+
+        var chatCreateCooldown = riskService.CheckChatCreationCooldown(account);
+        if (chatCreateCooldown.IsBlocked)
+        {
+            return Results.BadRequest(new OperationResultDto(
+                false,
+                chatCreateCooldown.Message,
+                chatCreateCooldown.Code,
+                chatCreateCooldown.AvailableAtUtc,
+                chatCreateCooldown.RetryAfterSeconds));
+        }
 
         if (!request.IgnoreRiskWarning)
         {
@@ -4581,8 +4605,20 @@ public static class PanelAdminApiEndpoints
             channel.IsBroadcast,
             channel.MemberCount);
 
-    private static OperationAccountDto ToOperationAccountDto(Account account) =>
-        new(account.Id, account.DisplayPhone, account.Nickname, account.Username, account.IsActive, account.CategoryId);
+    private static OperationAccountDto ToOperationAccountDto(Account account, AccountRiskService riskService)
+    {
+        var cooldown = riskService.CheckChatCreationCooldown(account);
+        return new OperationAccountDto(
+            account.Id,
+            account.DisplayPhone,
+            account.Nickname,
+            account.Username,
+            account.IsActive,
+            account.CategoryId,
+            account.CreatedAt,
+            cooldown.AvailableAtUtc,
+            cooldown.RetryAfterSeconds);
+    }
 
     private static ChatAdminDto ToDto(ChannelAdminInfo admin) =>
         new(
@@ -5896,7 +5932,12 @@ public static class PanelAdminApiEndpoints
 
 public sealed record LoginRequestDto(string? Username, string? Password);
 public sealed record AuthMeDto(bool Authenticated, string? Username, bool MustChangePassword, bool AuthEnabled, string Version);
-public sealed record OperationResultDto(bool Success, string? Message);
+public sealed record OperationResultDto(
+    bool Success,
+    string? Message,
+    string? Code = null,
+    DateTime? RetryAtUtc = null,
+    int? RetryAfterSeconds = null);
 public sealed record PagedResultDto<T>(IReadOnlyList<T> Items, int Total, int Page, int PageSize);
 public sealed record DashboardSummaryDto(
     int AccountCount,
@@ -6356,7 +6397,10 @@ public sealed record OperationAccountDto(
     string? Nickname,
     string? Username,
     bool IsActive,
-    int? CategoryId);
+    int? CategoryId,
+    DateTime CreatedAt,
+    DateTime? ChatCreateAvailableAtUtc,
+    int? ChatCreateCooldownRemainingSeconds);
 
 public sealed record SimpleCategoryDto(
     int Id,

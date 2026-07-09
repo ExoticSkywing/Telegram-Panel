@@ -1,11 +1,16 @@
 services:
   telegram-panel:
-    image: ${TP_IMAGE:-ghcr.io/moeacgx/telegram-panel:latest}
-    pull_policy: always
+    # 默认使用当前仓库源码构建本地镜像，避免 `docker compose up` 拉取远端 latest 覆盖本地改动。
+    # 更新代码后执行：docker compose up -d --build telegram-panel
+    build:
+      context: .
+      dockerfile: Dockerfile
+      pull: true
+    image: ${TP_IMAGE:-telegram-panel:local}
     container_name: telegram-panel
     restart: unless-stopped
     ports:
-      - "5000:5000"
+      - "5232:5000"
     volumes:
       - ./docker-data:/data
     environment:
@@ -20,6 +25,8 @@ services:
 
       # 后台登录凭据文件（持久化到 ./docker-data/admin_auth.json）
       AdminAuth__CredentialsPath: "/data/admin_auth.json"
+      AdminAuth__InitialUsername: "${TP_ADMIN_INITIAL_USERNAME:?请在 .env 中配置 TP_ADMIN_INITIAL_USERNAME}"
+      AdminAuth__InitialPassword: "${TP_ADMIN_INITIAL_PASSWORD:?请在 .env 中配置 TP_ADMIN_INITIAL_PASSWORD}"
 
       # 说明：这些“易变开关”建议通过面板「系统设置」保存到 /data/appsettings.local.json 来配置，
       # 不要直接改 docker-compose.yml（否则 git pull 更新时容易冲突）。

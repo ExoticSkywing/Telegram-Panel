@@ -18,6 +18,7 @@ public sealed class ChannelGroupPrivateCreateTaskHandler : IModuleTaskHandler
     {
         var config = Deserialize(host.Config);
         Validate(config);
+        config.RecentFailures.Clear();
 
         var accountManagement = host.Services.GetRequiredService<AccountManagementService>();
         var channelManagement = host.Services.GetRequiredService<ChannelManagementService>();
@@ -122,12 +123,17 @@ public sealed class ChannelGroupPrivateCreateTaskHandler : IModuleTaskHandler
                     created++;
                     await host.UpdateProgressAsync(created, failed, cancellationToken);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    processedForAccount++;
+                    var skipRemainingForAccount = ex is ChatCreationCooldownException;
+                    processedForAccount = skipRemainingForAccount
+                        ? config.PerAccountBatchSize
+                        : processedForAccount + 1;
                     created++;
                     failed++;
+                    AddRecentFailure(config, account, ex);
                     await host.UpdateProgressAsync(created, failed, cancellationToken);
+                    await taskManagement.UpdateTaskConfigAsync(host.TaskId, JsonSerializer.Serialize(config));
                 }
 
                 if (processedForAccount < config.PerAccountBatchSize && createdCount < config.SystemCreatedLimit)
@@ -144,7 +150,21 @@ public sealed class ChannelGroupPrivateCreateTaskHandler : IModuleTaskHandler
             }
         }
 
-        await taskManagement.UpdateTaskDraftAsync(host.TaskId, created, host.Config);
+        await taskManagement.UpdateTaskDraftAsync(host.TaskId, created, JsonSerializer.Serialize(config));
+    }
+
+    private static void AddRecentFailure(
+        ChannelGroupPrivateCreateTaskConfig config,
+        Account account,
+        Exception exception)
+    {
+        var message = exception is ChatCreationCooldownException cooldownException
+            ? cooldownException.Cooldown.Message
+            : exception.Message;
+        var line = $"{account.DisplayPhone}：{message}";
+        config.RecentFailures.Add(line);
+        if (config.RecentFailures.Count > 20)
+            config.RecentFailures.RemoveRange(0, config.RecentFailures.Count - 20);
     }
 
     private static async Task ApplyAvatarIfNeededAsync(
@@ -216,6 +236,7 @@ public sealed class ChannelGroupPrivateCreateTaskHandler : IModuleTaskHandler
         config.MaxDelaySeconds = ChannelGroupTaskDelayHelper.NormalizeMaxDelay(config.MinDelaySeconds, config.MaxDelaySeconds);
         config.JitterPercent = ChannelGroupTaskDelayHelper.NormalizeJitterPercent(config.JitterPercent);
         config.AvatarSource = NormalizeAvatarSource(config.AvatarSource);
+        config.RecentFailures ??= new List<string>();
     }
 
     private static string NormalizeAvatarSource(string? value)

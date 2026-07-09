@@ -12,6 +12,68 @@ public class AccountRiskService
     /// </summary>
     private const double RISK_THRESHOLD_HOURS = 24.0;
 
+    public const string ChatCreateCooldownCode = "CHAT_CREATE_COOLDOWN";
+    private static readonly TimeSpan ChatCreateCooldown = TimeSpan.FromHours(24);
+
+    public ChatCreationCooldownResult CheckChatCreationCooldown(Account account, DateTime? nowUtc = null)
+    {
+        var createdAtUtc = NormalizeUtc(account.CreatedAt);
+        if (createdAtUtc == default)
+            return ChatCreationCooldownResult.Allowed;
+
+        var checkedAtUtc = nowUtc ?? DateTime.UtcNow;
+        var availableAtUtc = createdAtUtc.Add(ChatCreateCooldown);
+        var remaining = availableAtUtc - checkedAtUtc;
+        if (remaining <= TimeSpan.Zero)
+            return ChatCreationCooldownResult.Allowed;
+
+        var retryAfterSeconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        return new ChatCreationCooldownResult
+        {
+            IsBlocked = true,
+            Code = ChatCreateCooldownCode,
+            AvailableAtUtc = availableAtUtc,
+            RetryAfterSeconds = retryAfterSeconds,
+            Message = $"该账号加入面板未满 24 小时，暂时不能创建频道或群组。为降低 Telegram 风控风险，请等待 {FormatRemaining(remaining)} 后再试"
+        };
+    }
+
+    public async Task EnsureChatCreationAllowedAsync(
+        int accountId,
+        AccountManagementService accountManagement,
+        DateTime? nowUtc = null)
+    {
+        var account = await accountManagement.GetAccountAsync(accountId)
+            ?? throw new InvalidOperationException("账号不存在");
+        var cooldown = CheckChatCreationCooldown(account, nowUtc);
+        if (cooldown.IsBlocked)
+            throw new ChatCreationCooldownException(cooldown);
+    }
+
+    private static DateTime NormalizeUtc(DateTime value)
+    {
+        return value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+        };
+    }
+
+    private static string FormatRemaining(TimeSpan remaining)
+    {
+        var totalSeconds = Math.Max(1, (int)Math.Ceiling(remaining.TotalSeconds));
+        var hours = totalSeconds / 3600;
+        var minutes = totalSeconds % 3600 / 60;
+        var seconds = totalSeconds % 60;
+
+        if (hours > 0)
+            return $"{hours} 小时 {minutes} 分 {seconds} 秒";
+        if (minutes > 0)
+            return $"{minutes} 分 {seconds} 秒";
+        return $"{seconds} 秒";
+    }
+
     /// <summary>
     /// 检查单个账号的登录时长是否满足风控要求
     /// </summary>
@@ -94,6 +156,28 @@ public class AccountRiskService
             HasRiskyAccounts = riskyAccounts.Count > 0
         };
     }
+}
+
+public sealed class ChatCreationCooldownResult
+{
+    public static ChatCreationCooldownResult Allowed { get; } = new();
+
+    public bool IsBlocked { get; init; }
+    public string? Code { get; init; }
+    public string Message { get; init; } = string.Empty;
+    public DateTime? AvailableAtUtc { get; init; }
+    public int? RetryAfterSeconds { get; init; }
+}
+
+public sealed class ChatCreationCooldownException : InvalidOperationException
+{
+    public ChatCreationCooldownException(ChatCreationCooldownResult cooldown)
+        : base(cooldown.Message)
+    {
+        Cooldown = cooldown;
+    }
+
+    public ChatCreationCooldownResult Cooldown { get; }
 }
 
 /// <summary>
