@@ -39,7 +39,7 @@
       />
       <el-form-item>
         <el-button @click="router.push(kind === 'channel' ? '/channels' : '/groups')">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="submit">创建{{ kindName }}</el-button>
+        <el-button type="primary" :loading="saving" @click="submit()">创建{{ kindName }}</el-button>
       </el-form-item>
     </el-form>
   </el-card>
@@ -55,6 +55,7 @@ import { showRiskWarning } from '@/utils/riskWarning'
 import type { OperationAccount, SimpleCategory } from '@/api/types'
 
 type Kind = 'channel' | 'group'
+const ACCOUNT_RISK_CONFIRMATION_REQUIRED = 'ACCOUNT_RISK_CONFIRMATION_REQUIRED'
 const props = defineProps<{ kind: Kind }>()
 const router = useRouter()
 const kind = computed(() => props.kind)
@@ -82,7 +83,11 @@ async function loadMeta() {
   categories.value = kind.value === 'channel' ? await panelApi.channelGroups() : await panelApi.groupCategories()
 }
 
-async function submit(ignoreRiskWarning = false) {
+async function submit() {
+  await createChat(false)
+}
+
+async function createChat(ignoreRiskWarning: boolean) {
   if (form.accountId <= 0) {
     ElMessage.warning('请选择账号')
     return
@@ -126,9 +131,10 @@ async function submit(ignoreRiskWarning = false) {
     }
   } catch (error: any) {
     const message = extractApiErrorMessage(error?.response?.data)
-    if (!ignoreRiskWarning && message.includes('24 小时')) {
+    const code = error?.response?.data?.code
+    if (!ignoreRiskWarning && code === ACCOUNT_RISK_CONFIRMATION_REQUIRED) {
       const action = await showRiskWarning({ title: '风控警告', message })
-      if (action === 'continue') await submit(true)
+      if (action === 'continue') await createChat(true)
     } else if (!message) {
       ElMessage.error(error?.message || `创建${kindName.value}失败`)
     }

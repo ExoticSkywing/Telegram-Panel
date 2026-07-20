@@ -22,6 +22,8 @@ namespace TelegramPanel.Web.Api;
 
 public static class PanelAdminApiEndpoints
 {
+    private const string AccountRiskConfirmationRequiredCode = "ACCOUNT_RISK_CONFIRMATION_REQUIRED";
+
     public static void MapPanelAdminApi(this WebApplication app, bool requireAdminAuth)
     {
         var api = app.MapGroup("/api/panel");
@@ -2254,7 +2256,10 @@ public static class PanelAdminApiEndpoints
         {
             var risk = riskService.CheckLoginDuration(account);
             if (risk.IsRisky)
-                return Results.BadRequest(new OperationResultDto(false, $"{risk.Message}。{risk.DetailedMessage}"));
+                return Results.BadRequest(new OperationResultDto(
+                    false,
+                    $"{risk.Message}。{risk.DetailedMessage}",
+                    AccountRiskConfirmationRequiredCode));
         }
 
         var about = (request.About ?? string.Empty).Trim();
@@ -2365,7 +2370,10 @@ public static class PanelAdminApiEndpoints
         {
             var risk = riskService.CheckLoginDuration(account);
             if (risk.IsRisky)
-                return Results.BadRequest(new OperationResultDto(false, $"{risk.Message}。{risk.DetailedMessage}"));
+                return Results.BadRequest(new OperationResultDto(
+                    false,
+                    $"{risk.Message}。{risk.DetailedMessage}",
+                    AccountRiskConfirmationRequiredCode));
         }
 
         try
@@ -6360,7 +6368,7 @@ public static class PanelAdminApiEndpoints
 
 public sealed record LoginRequestDto(string? Username, string? Password);
 public sealed record AuthMeDto(bool Authenticated, string? Username, bool MustChangePassword, bool AuthEnabled, string Version);
-public sealed record OperationResultDto(bool Success, string? Message);
+public sealed record OperationResultDto(bool Success, string? Message, string? Code = null);
 public sealed record SystemRestartResultDto(bool Success, string? Message, bool RestartScheduled);
 public sealed record PagedResultDto<T>(IReadOnlyList<T> Items, int Total, int Page, int PageSize);
 public sealed record DashboardSummaryDto(

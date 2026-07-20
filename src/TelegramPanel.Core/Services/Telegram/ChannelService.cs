@@ -17,17 +17,20 @@ public class ChannelService : IChannelService
     private readonly AccountManagementService _accountManagement;
     private readonly IConfiguration _configuration;
     private readonly ILogger<ChannelService> _logger;
+    private readonly ISessionPathResolver _sessionPathResolver;
 
     public ChannelService(
         ITelegramClientPool clientPool,
         AccountManagementService accountManagement,
         IConfiguration configuration,
-        ILogger<ChannelService> logger)
+        ILogger<ChannelService> logger,
+        ISessionPathResolver sessionPathResolver)
     {
         _clientPool = clientPool;
         _accountManagement = accountManagement;
         _configuration = configuration;
         _logger = logger;
+        _sessionPathResolver = sessionPathResolver;
     }
 
     public async Task<List<ChannelInfo>> GetOwnedChannelsAsync(int accountId)
@@ -1088,7 +1091,7 @@ public class ChannelService : IChannelService
         if (string.IsNullOrWhiteSpace(account.SessionPath))
             throw new InvalidOperationException("账号缺少 SessionPath，无法创建 Telegram 客户端");
 
-        var absoluteSessionPath = Path.GetFullPath(account.SessionPath);
+        var absoluteSessionPath = _sessionPathResolver.Resolve(account.SessionPath);
         if (File.Exists(absoluteSessionPath) && LooksLikeSqliteSession(absoluteSessionPath))
         {
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(
@@ -1109,7 +1112,7 @@ public class ChannelService : IChannelService
         }
 
         await _clientPool.RemoveClientAsync(accountId);
-        var client = await _clientPool.GetOrCreateClientAsync(accountId, apiId, apiHash, account.SessionPath, sessionKey, account.Phone, account.UserId);
+        var client = await _clientPool.GetOrCreateClientAsync(accountId, apiId, apiHash, absoluteSessionPath, sessionKey, account.Phone, account.UserId);
 
         try
         {

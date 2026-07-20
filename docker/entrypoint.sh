@@ -1,36 +1,105 @@
 #!/usr/bin/env sh
 set -eu
 
-APP_ENTRY="TelegramPanel.Web.dll"
-DEFAULT_APP_DIR="/app"
-UPDATED_APP_DIR="/data/app-current"
-UPDATED_APP_MARKER="$UPDATED_APP_DIR/.telegram-panel-self-update"
+# 修改入口状态协议时必须递增；应用只会用更高版本覆盖容器入口，避免持久旧程序降级新镜像脚本。
+ENTRYPOINT_PROTOCOL_VERSION=2
+APP_ENTRY="${TELEGRAM_PANEL_APP_ENTRY:-TelegramPanel.Web.dll}"
+DATA_DIR="${TELEGRAM_PANEL_DATA_DIR:-/data}"
+DEFAULT_APP_DIR="${TELEGRAM_PANEL_DEFAULT_APP_DIR:-/app}"
+UPDATED_APP_DIR="${TELEGRAM_PANEL_UPDATED_APP_DIR:-$DATA_DIR/app-current}"
+BACKUP_APP_DIR="${TELEGRAM_PANEL_BACKUP_APP_DIR:-$DATA_DIR/app-previous}"
+DOTNET_COMMAND="${TELEGRAM_PANEL_DOTNET_COMMAND:-dotnet}"
 
-mkdir -p /data /data/sessions /data/logs
-if [ ! -f /data/appsettings.local.json ]; then
-  printf '{}' > /data/appsettings.local.json
+UPDATED_APP_MARKER="$UPDATED_APP_DIR/.telegram-panel-self-update"
+UPDATE_PENDING_MARKER="$UPDATED_APP_DIR/.telegram-panel-update-pending"
+UPDATE_ATTEMPTED_MARKER="$UPDATED_APP_DIR/.telegram-panel-update-attempted"
+UPDATE_CONFIRMED_MARKER="$UPDATED_APP_DIR/.telegram-panel-update-confirmed"
+
+log() {
+  printf '[telegram-panel-entrypoint] %s\n' "$*" >&2
+}
+
+mkdir -p "$DATA_DIR" "$DATA_DIR/sessions" "$DATA_DIR/logs"
+if [ ! -f "$DATA_DIR/appsettings.local.json" ]; then
+  printf '{}' > "$DATA_DIR/appsettings.local.json"
 fi
 
 APP_DIR="$DEFAULT_APP_DIR"
-if [ -f "$UPDATED_APP_MARKER" ] && [ -f "$UPDATED_APP_DIR/$APP_ENTRY" ]; then
-  APP_DIR="$UPDATED_APP_DIR"
+if [ -f "$UPDATED_APP_DIR/$APP_ENTRY" ]; then
+  if [ -f "$UPDATE_CONFIRMED_MARKER" ]; then
+    APP_DIR="$UPDATED_APP_DIR"
+  elif [ -f "$UPDATE_ATTEMPTED_MARKER" ]; then
+    FAILED_APP_DIR="$DATA_DIR/app-failed-$(date +%Y%m%d%H%M%S)-$$"
+    log "检测到新版本上次启动未确认，正在归档失败版本：$FAILED_APP_DIR"
+
+    if mv "$UPDATED_APP_DIR" "$FAILED_APP_DIR"; then
+      if [ -f "$BACKUP_APP_DIR/$APP_ENTRY" ] && mv "$BACKUP_APP_DIR" "$UPDATED_APP_DIR"; then
+        APP_DIR="$UPDATED_APP_DIR"
+        log "已自动切回上一版本：$UPDATED_APP_DIR"
+      else
+        APP_DIR="$DEFAULT_APP_DIR"
+        log "未找到可用的 app-previous，已回退到镜像内版本：$DEFAULT_APP_DIR"
+      fi
+    else
+      APP_DIR="$DEFAULT_APP_DIR"
+      log "归档失败版本失败，为避免重试坏版本，本次回退到：$DEFAULT_APP_DIR"
+    fi
+  elif [ -f "$UPDATE_PENDING_MARKER" ]; then
+    if mv "$UPDATE_PENDING_MARKER" "$UPDATE_ATTEMPTED_MARKER"; then
+      APP_DIR="$UPDATED_APP_DIR"
+      log "开始首次启动新版本，已记录 attempted 状态"
+    else
+      log "无法记录新版本启动尝试，为安全起见继续使用：$DEFAULT_APP_DIR"
+    fi
+  elif [ -f "$UPDATED_APP_MARKER" ]; then
+    # 兼容 v1.31.32 之前只写单个 marker 的更新器。
+    # 若目标包已经携带新版入口脚本，说明它能在 StartAsync 后确认状态；
+    # 这里先补记 attempted，连“程序集加载失败、尚未进入 Program”的情况也能在下次启动回滚。
+    if [ -f "$UPDATED_APP_DIR/self-update/entrypoint.sh" ]; then
+      if cp "$UPDATED_APP_MARKER" "$UPDATE_ATTEMPTED_MARKER"; then
+        APP_DIR="$UPDATED_APP_DIR"
+        log "已将旧版更新 marker 迁移为 attempted 状态"
+      else
+        log "无法迁移旧版更新 marker，为安全起见继续使用：$DEFAULT_APP_DIR"
+      fi
+    else
+      APP_DIR="$UPDATED_APP_DIR"
+    fi
+  fi
 fi
 
-# 运行目录下日志统一指向 /data/logs，避免更新目录轮换后日志丢失。
+# 运行目录下日志统一指向持久化目录，避免更新目录轮换后日志丢失。
 if [ -e "$APP_DIR/logs" ] && [ ! -L "$APP_DIR/logs" ]; then
   rm -rf "$APP_DIR/logs"
 fi
 if [ ! -e "$APP_DIR/logs" ]; then
-  ln -s /data/logs "$APP_DIR/logs" || true
+  ln -s "$DATA_DIR/logs" "$APP_DIR/logs" || true
 fi
 
-# 面板保存的本地配置统一使用 /data/appsettings.local.json
+# 面板保存的本地配置统一使用持久化目录。
 if [ -e "$APP_DIR/appsettings.local.json" ] && [ ! -L "$APP_DIR/appsettings.local.json" ]; then
   rm -f "$APP_DIR/appsettings.local.json"
 fi
 if [ ! -e "$APP_DIR/appsettings.local.json" ]; then
-  ln -s /data/appsettings.local.json "$APP_DIR/appsettings.local.json" || true
+  ln -s "$DATA_DIR/appsettings.local.json" "$APP_DIR/appsettings.local.json" || true
+fi
+
+# 历史账号记录可能保存了 sessions/<手机号>.session 这类相对路径。
+# 将当前程序目录的 sessions 固定映射到持久化目录，保证切换 app-current 后旧记录仍可用。
+# 若旧目录里已有文件，先只复制不覆盖地迁移，并保留原目录备份。
+if [ -e "$APP_DIR/sessions" ] && [ ! -L "$APP_DIR/sessions" ]; then
+  if [ -d "$APP_DIR/sessions" ]; then
+    cp -an "$APP_DIR/sessions/." "$DATA_DIR/sessions/" || true
+  fi
+  LEGACY_SESSIONS_DIR="$APP_DIR/sessions.before-persistent"
+  if [ -e "$LEGACY_SESSIONS_DIR" ]; then
+    LEGACY_SESSIONS_DIR="$LEGACY_SESSIONS_DIR.$(date +%Y%m%d%H%M%S)"
+  fi
+  mv "$APP_DIR/sessions" "$LEGACY_SESSIONS_DIR" || true
+fi
+if [ ! -e "$APP_DIR/sessions" ]; then
+  ln -s "$DATA_DIR/sessions" "$APP_DIR/sessions" || true
 fi
 
 cd "$APP_DIR"
-exec dotnet "$APP_ENTRY"
+exec "$DOTNET_COMMAND" "$APP_ENTRY"

@@ -18,17 +18,20 @@ public class GroupService : IGroupService
     private readonly AccountManagementService _accountManagement;
     private readonly IConfiguration _configuration;
     private readonly ILogger<GroupService> _logger;
+    private readonly ISessionPathResolver _sessionPathResolver;
 
     public GroupService(
         ITelegramClientPool clientPool,
         AccountManagementService accountManagement,
         IConfiguration configuration,
-        ILogger<GroupService> logger)
+        ILogger<GroupService> logger,
+        ISessionPathResolver sessionPathResolver)
     {
         _clientPool = clientPool;
         _accountManagement = accountManagement;
         _configuration = configuration;
         _logger = logger;
+        _sessionPathResolver = sessionPathResolver;
     }
 
     public async Task<List<GroupInfo>> GetOwnedGroupsAsync(int accountId)
@@ -1120,7 +1123,7 @@ public class GroupService : IGroupService
         if (string.IsNullOrWhiteSpace(account.SessionPath))
             throw new InvalidOperationException("账号缺少 SessionPath，无法创建 Telegram 客户端");
 
-        var absoluteSessionPath = Path.GetFullPath(account.SessionPath);
+        var absoluteSessionPath = _sessionPathResolver.Resolve(account.SessionPath);
         if (System.IO.File.Exists(absoluteSessionPath) && LooksLikeSqliteSession(absoluteSessionPath))
         {
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(
@@ -1141,7 +1144,7 @@ public class GroupService : IGroupService
         }
 
         await _clientPool.RemoveClientAsync(accountId);
-        var client = await _clientPool.GetOrCreateClientAsync(accountId, apiId, apiHash, account.SessionPath, sessionKey, account.Phone, account.UserId);
+        var client = await _clientPool.GetOrCreateClientAsync(accountId, apiId, apiHash, absoluteSessionPath, sessionKey, account.Phone, account.UserId);
 
         try
         {

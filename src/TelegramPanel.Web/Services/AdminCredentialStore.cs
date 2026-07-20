@@ -6,6 +6,7 @@ namespace TelegramPanel.Web.Services;
 
 public sealed class AdminCredentialStore
 {
+    private readonly IConfiguration _configuration;
     private readonly IWebHostEnvironment _environment;
     private readonly IOptionsMonitor<AdminAuthOptions> _options;
     private readonly ILogger<AdminCredentialStore> _logger;
@@ -14,10 +15,12 @@ public sealed class AdminCredentialStore
     private AdminCredentialFile? _cached;
 
     public AdminCredentialStore(
+        IConfiguration configuration,
         IWebHostEnvironment environment,
         IOptionsMonitor<AdminAuthOptions> options,
         ILogger<AdminCredentialStore> logger)
     {
+        _configuration = configuration;
         _environment = environment;
         _options = options;
         _logger = logger;
@@ -30,7 +33,11 @@ public sealed class AdminCredentialStore
     public bool MustChangePassword => _cached?.MustChangePassword == true;
 
     public string CredentialsFilePath =>
-        StoragePathResolver.ResolveRelativeToBase(_options.CurrentValue.CredentialsPath, _environment.ContentRootPath);
+        StoragePathResolver.ResolveWritablePath(
+            _configuration,
+            _environment,
+            _options.CurrentValue.CredentialsPath,
+            "admin_auth.json");
 
     public async Task EnsureInitializedAsync(CancellationToken cancellationToken = default)
     {

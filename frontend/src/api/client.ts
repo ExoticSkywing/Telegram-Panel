@@ -42,7 +42,9 @@ api.interceptors.response.use(
     }
 
     const message = extractApiErrorMessage(err?.response?.data) || err?.message
-    if (message) ElMessage.error(message)
+    const code = err?.response?.data?.code
+    // 需要用户确认的风控响应由业务页面弹窗处理，不重复显示全局错误提示。
+    if (message && code !== 'ACCOUNT_RISK_CONFIRMATION_REQUIRED') ElMessage.error(message)
     return Promise.reject(err)
   },
 )

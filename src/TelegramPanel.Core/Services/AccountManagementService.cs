@@ -18,6 +18,7 @@ public class AccountManagementService
     private readonly ITelegramClientPool _clientPool;
     private readonly IConfiguration _configuration;
     private readonly ILogger<AccountManagementService> _logger;
+    private readonly ISessionPathResolver _sessionPathResolver;
 
     public AccountManagementService(
         IAccountRepository accountRepository,
@@ -25,7 +26,8 @@ public class AccountManagementService
         IGroupRepository groupRepository,
         ITelegramClientPool clientPool,
         IConfiguration configuration,
-        ILogger<AccountManagementService> logger)
+        ILogger<AccountManagementService> logger,
+        ISessionPathResolver sessionPathResolver)
     {
         _accountRepository = accountRepository;
         _channelRepository = channelRepository;
@@ -33,6 +35,7 @@ public class AccountManagementService
         _clientPool = clientPool;
         _configuration = configuration;
         _logger = logger;
+        _sessionPathResolver = sessionPathResolver;
     }
 
     public async Task<Account?> GetAccountAsync(int id)
@@ -262,7 +265,7 @@ public class AccountManagementService
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         if (!string.IsNullOrWhiteSpace(account.SessionPath))
-            AddCandidatePath(account.SessionPath);
+            AddCandidatePath(_sessionPathResolver.Resolve(account.SessionPath));
 
         // 常见命名：sessions/<phone>.session
         var phoneDigits = NormalizePhone(account.Phone);
@@ -270,7 +273,7 @@ public class AccountManagementService
         {
             var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
             AddCandidatePath(Path.Combine(sessionsPath, $"{phoneDigits}.session"));
-            AddCandidatePath(Path.Combine("sessions", $"{phoneDigits}.session"));
+            AddCandidatePath(_sessionPathResolver.Resolve(Path.Combine("sessions", $"{phoneDigits}.session")));
             AddCandidatePath(Path.Combine("src", "TelegramPanel.Web", "sessions", $"{phoneDigits}.session"));
         }
 

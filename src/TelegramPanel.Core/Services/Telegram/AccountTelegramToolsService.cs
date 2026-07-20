@@ -25,19 +25,22 @@ public class AccountTelegramToolsService
     private readonly IConfiguration _configuration;
     private readonly ILogger<AccountTelegramToolsService> _logger;
     private readonly TelegramAccountUpdateHub _updateHub;
+    private readonly ISessionPathResolver _sessionPathResolver;
 
     public AccountTelegramToolsService(
         AccountManagementService accountManagement,
         ITelegramClientPool clientPool,
         IConfiguration configuration,
         ILogger<AccountTelegramToolsService> logger,
-        TelegramAccountUpdateHub updateHub)
+        TelegramAccountUpdateHub updateHub,
+        ISessionPathResolver sessionPathResolver)
     {
         _accountManagement = accountManagement;
         _clientPool = clientPool;
         _configuration = configuration;
         _logger = logger;
         _updateHub = updateHub;
+        _sessionPathResolver = sessionPathResolver;
     }
 
     /// <summary>
@@ -2010,7 +2013,7 @@ public class AccountTelegramToolsService
         if (string.IsNullOrWhiteSpace(account.SessionPath))
             throw new InvalidOperationException("账号缺少 SessionPath，无法创建 Telegram 客户端");
 
-        var absoluteSessionPath = Path.GetFullPath(account.SessionPath);
+        var absoluteSessionPath = _sessionPathResolver.Resolve(account.SessionPath);
         if (File.Exists(absoluteSessionPath) && SessionDataConverter.LooksLikeSqliteSession(absoluteSessionPath))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -2038,7 +2041,7 @@ public class AccountTelegramToolsService
             accountId: accountId,
             apiId: apiId,
             apiHash: apiHash,
-            sessionPath: account.SessionPath,
+            sessionPath: absoluteSessionPath,
             sessionKey: sessionKey,
             phoneNumber: account.Phone,
             userId: account.UserId > 0 ? account.UserId : null);

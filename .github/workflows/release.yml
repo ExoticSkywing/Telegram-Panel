@@ -67,7 +67,10 @@ jobs:
           pnpm --dir frontend run build
 
       - name: Restore
-        run: dotnet restore src/TelegramPanel.Web/TelegramPanel.Web.csproj
+        run: dotnet restore tests/TelegramPanel.Web.Tests/TelegramPanel.Web.Tests.csproj
+
+      - name: Test persistent storage and self update
+        run: dotnet test tests/TelegramPanel.Web.Tests/TelegramPanel.Web.Tests.csproj -c Release --no-restore
 
       - name: Publish Linux update packages
         shell: bash
@@ -86,6 +89,28 @@ jobs:
             --self-contained false \
             -p:UseAppHost=false \
             -o artifacts/linux-arm64
+
+          for target in artifacts/linux-x64 artifacts/linux-arm64; do
+            test -f "$target/self-update/entrypoint.sh"
+            cmp -s docker/entrypoint.sh "$target/self-update/entrypoint.sh"
+            sh -n "$target/self-update/entrypoint.sh"
+            if LC_ALL=C grep -q $'\r' "$target/self-update/entrypoint.sh"; then
+              echo "entrypoint.sh contains CRLF: $target" >&2
+              exit 1
+            fi
+
+            leaked="$(find "$target" -type f \( \
+              -name 'telegram-panel.db' -o \
+              -name 'telegram_panel.db' -o \
+              -name 'admin_auth.json' -o \
+              -name 'appsettings.local.json' -o \
+              -name '*.session' \
+            \) -print -quit)"
+            if [[ -n "$leaked" ]]; then
+              echo "persistent user data leaked into release: $leaked" >&2
+              exit 1
+            fi
+          done
 
       - name: Pack release assets
         shell: bash
@@ -182,6 +207,11 @@ jobs:
             ## 本次版本主要更新
 
             > 下方会自动附加完整变更记录（Changelog），这里保留部署与更新入口说明。
+
+            > [!WARNING]
+            > 如果当前账号列表已在旧版一键更新后变空，请勿直接再次点击一键更新。
+            > 先停止容器并备份宿主机 `docker-data` 与容器内 `/app`；本版可以恢复仍存在的旧库，
+            > 但无法重新生成已经被旧更新器或人工操作删除的文件。
 
             ## 部署与更新
 

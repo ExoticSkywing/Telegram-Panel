@@ -1,7 +1,6 @@
 using System.IO.Compression;
 using System.Collections.Concurrent;
 using System.Text;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Services.Telegram;
@@ -19,21 +18,18 @@ public enum AccountExportFormat
 
 public class AccountExportService
 {
-    private readonly IWebHostEnvironment _environment;
-    private readonly IConfiguration _configuration;
     private readonly ILogger<AccountExportService> _logger;
     private readonly ITelegramClientPool _clientPool;
+    private readonly ISessionPathResolver _sessionPathResolver;
 
     public AccountExportService(
-        IWebHostEnvironment environment,
-        IConfiguration configuration,
         ILogger<AccountExportService> logger,
-        ITelegramClientPool clientPool)
+        ITelegramClientPool clientPool,
+        ISessionPathResolver sessionPathResolver)
     {
-        _environment = environment;
-        _configuration = configuration;
         _logger = logger;
         _clientPool = clientPool;
+        _sessionPathResolver = sessionPathResolver;
     }
 
     public async Task<byte[]> BuildAccountsZipAsync(
@@ -350,19 +346,11 @@ public class AccountExportService
         var sessionPath = account.SessionPath ?? string.Empty;
         if (string.IsNullOrWhiteSpace(sessionPath))
         {
-            var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
             var phoneDigits = NormalizePhone(account.Phone);
-            return Path.GetFullPath(Path.Combine(_environment.ContentRootPath, sessionsPath, $"{phoneDigits}.session"));
+            sessionPath = $"{phoneDigits}.session";
         }
 
-        if (Path.IsPathRooted(sessionPath))
-            return Path.GetFullPath(sessionPath);
-
-        var combined = Path.GetFullPath(Path.Combine(_environment.ContentRootPath, sessionPath));
-        if (File.Exists(combined))
-            return combined;
-
-        return Path.GetFullPath(sessionPath);
+        return _sessionPathResolver.Resolve(sessionPath);
     }
 
     private async Task<PreparedExportSession> PrepareIndependentExportSessionAsync(Account account, CancellationToken cancellationToken)

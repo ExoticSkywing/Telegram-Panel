@@ -13,6 +13,7 @@ public static class ServiceCollectionExtensions
     public static IServiceCollection AddTelegramPanelCore(this IServiceCollection services)
     {
         services.AddSingleton<TelegramAccountUpdateHub>();
+        services.AddSingleton<ISessionPathResolver, SessionPathResolver>();
 
         // 注册 Telegram 客户端池（单例）
         services.AddSingleton<ITelegramClientPool, TelegramClientPool>();

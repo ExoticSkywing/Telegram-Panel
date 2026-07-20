@@ -9,6 +9,7 @@ export interface AuthMe {
 export interface OperationResult {
   success: boolean
   message?: string | null
+  code?: string | null
 }
 
 export interface SystemRestartResult extends OperationResult {

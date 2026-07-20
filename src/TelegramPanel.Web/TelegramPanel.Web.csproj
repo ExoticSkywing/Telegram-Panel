@@ -24,6 +24,17 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Linux 一键更新 ZIP 必须携带入口脚本，供旧容器在新程序启动早期原子安装。 -->
+    <Content Include="..\..\docker\entrypoint.sh" Link="self-update\entrypoint.sh">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleToAttribute">
+      <_Parameter1>TelegramPanel.Web.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Remove="Modules\state.json" />
     <Content Remove="Modules\active\**" />
     <Content Remove="Modules\data\**" />

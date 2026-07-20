@@ -216,6 +216,12 @@ if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringCompa
     }
 }
 
+// 旧容器的一键更新只会替换 /data/app-current，不会自动更新镜像内的 /entrypoint.sh。
+// 必须在创建主机前先安装新版入口并记录启动尝试，后续初始化失败时才能在下一次启动自动回滚。
+SelfUpdateStartupCoordinator.PrepareCurrentProcess(
+    AppContext.BaseDirectory,
+    message => Console.WriteLine($"[SelfUpdate] {message}"));
+
 var builder = WebApplication.CreateBuilder(args);
 
 // 可选的本地覆盖配置（不要提交到仓库）
@@ -243,6 +249,13 @@ catch (FileNotFoundException ex)
 {
     Console.Error.WriteLine($"Ignoring missing appsettings.local.json: {ex.Message}");
 }
+
+// 自更新会切换 ContentRootPath。数据库、后台凭据和 Session 必须在此之前统一到持久化目录，
+// 并尝试从旧的 /app、app-current、app-previous 目录恢复，避免升级后打开空库或重新生成默认凭据。
+var persistentStorage = PersistentStorageBootstrapper.Initialize(
+    builder.Configuration,
+    builder.Environment,
+    message => Console.WriteLine($"[Storage] {message}"));
 
 // 配置 Serilog
 static int ReadRetainedFileCountLimit(IConfiguration configuration)
@@ -382,32 +395,8 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 // 数据库上下文
-var configuredConnectionString = builder.Configuration.GetConnectionString("DefaultConnection")
-    ?? "Data Source=telegram-panel.db";
-
-// 统一 SQLite 数据库路径为 ContentRoot 下的文件，避免因工作目录不同导致连到错误的 db（从而出现 no such table）
-var connectionString = configuredConnectionString;
-try
-{
-    var dataSourcePrefix = "Data Source=";
-    var trimmed = configuredConnectionString.Trim();
-    if (trimmed.StartsWith(dataSourcePrefix, StringComparison.OrdinalIgnoreCase))
-    {
-        var dataSource = trimmed.Substring(dataSourcePrefix.Length).Trim().Trim('"');
-        if (!Path.IsPathRooted(dataSource))
-        {
-            var absolute = Path.Combine(
-                StoragePathResolver.ResolveWritableRoot(builder.Configuration, builder.Environment),
-                dataSource);
-            connectionString = $"{dataSourcePrefix}{absolute}";
-        }
-    }
-}
-catch (Exception ex)
-{
-    Log.Warning(ex, "Failed to normalize sqlite connection string, using configured value");
-    connectionString = configuredConnectionString;
-}
+// 持久化路径初始化失败时必须中止启动，避免兜底到另一个空库并生成新的后台凭据。
+var connectionString = persistentStorage.ConnectionString;
 
 // 云端场景（容器/卷/后台任务）更容易出现 SQLite 写锁：这里统一增强连接参数，提升抗锁能力
 try
@@ -923,7 +912,7 @@ app.MapGet("/login", async (HttpContext http, IConfiguration configuration, Admi
     var disabledMsg = configured ? "" : "<div class=\"mud-alert mud-alert-filled mud-alert-filled-warning\" style=\"margin-bottom:12px;\">后台验证未启用</div>";
     var initialUsername = System.Net.WebUtility.HtmlEncode((configuration["AdminAuth:InitialUsername"] ?? "tgpanel").Trim());
     var initialPassword = System.Net.WebUtility.HtmlEncode((configuration["AdminAuth:InitialPassword"] ?? "tgpanel123").Trim());
-    var initialHint = configured
+    var initialHint = configured && credentialStore.MustChangePassword
         ? $"<div class=\"mud-alert mud-alert-filled mud-alert-filled-info\" style=\"margin-bottom:12px;\">初始账号：<b>{initialUsername}</b>，初始密码：<b>{initialPassword}</b>（首次登录后请立即修改）</div>"
         : "";
 
@@ -1347,13 +1336,27 @@ app.MapPost("/api/bot/webhook/{secretToken}", async (
 // TODO: Hangfire Dashboard
 // app.MapHangfireDashboard("/hangfire");
 
-Log.Information("Telegram Panel started");
-
 try
 {
-    app.Run();
+    await app.StartAsync();
+
+    // 只有主机与全部托管服务真正启动成功后，才确认自更新版本可用。
+    SelfUpdateStartupCoordinator.TryConfirmSuccessfulStartup(
+        AppContext.BaseDirectory,
+        VersionService.Version,
+        message => Log.Information("[SelfUpdate] {Message}", message));
+
+    Log.Information("Telegram Panel started");
+    await app.WaitForShutdownAsync();
 }
 finally
 {
-    Log.CloseAndFlush();
+    try
+    {
+        await app.DisposeAsync();
+    }
+    finally
+    {
+        Log.CloseAndFlush();
+    }
 }

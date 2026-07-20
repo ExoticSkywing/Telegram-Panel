@@ -2,6 +2,19 @@
 
 > 更新前建议先备份：`./docker-data/telegram-panel.db` 与 `./docker-data/`（尤其是重要账号的 sessions）。
 
+> **重要：** 如果当前账号列表已经在旧版一键更新后变空，先不要再次点击“一键更新”。
+> `v1.31.31` 及更早版本的旧更新器可能在切换目录前删除原有 `app-previous`，
+> 而有效旧库可能就在其中。请先停止容器并同时备份宿主机 `docker-data` 与容器内 `/app`：
+
+```bash
+docker compose stop telegram-panel
+cp -a docker-data "docker-data.backup-$(date +%s)"
+docker cp telegram-panel:/app "./container-app.backup-$(date +%s)"
+docker compose start telegram-panel
+```
+
+> `v1.31.32` 会恢复仍然存在的有效旧库，但无法重新生成已被旧更新器或人工操作删除的文件。
+
 ## 方式一：面板内一键更新（推荐先用）
 
 入口：`左上角版本号 -> 版本信息弹窗 -> 一键更新并重启`
@@ -11,6 +24,19 @@
 - 该方式基于 GitHub Release 更新包（`linux-x64/linux-arm64 zip`）
 - 会自动匹配架构并部署到 `/data/app-current`
 - 适合快速更新业务版本（无需手动执行命令）
+- 数据库、后台凭据和 Session 默认统一保存到 `/data`，不会随程序目录轮换
+- 从旧版本升级时，如果 `/data` 中目标库没有业务数据，启动会从 `/app`、`app-previous*` 或同一持久目录选择含账号最多的有效旧库；恢复前会备份目标，且不会删除来源
+- 新版本只有在服务真正启动成功后才会被确认；未确认便退出时会自动归档失败版本并回退 `app-previous`，首次更新无备份时回退镜像内 `/app`
+
+### 更新后账号或登录凭据异常
+
+如果更新后账号列表为空，先不要重新登录或覆盖任何文件，检查持久化目录：
+
+```bash
+docker exec telegram-panel sh -lc 'ls -l /data/telegram-panel.db /data/telegram_panel.db /data/admin_auth.json 2>/dev/null; find /data/sessions -maxdepth 1 -type f | head'
+```
+
+当前版本会在启动日志中打印实际使用的数据库、凭据和 Session 路径。若自定义部署把这些路径指向 `/app` 或 `/data/app-current`，一键更新会主动阻止，需先改到挂载卷（通常是 `/data`）再重试。
 
 ## 方式二：更新 Docker 镜像（建议定期执行）
 

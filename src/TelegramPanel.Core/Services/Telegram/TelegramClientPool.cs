@@ -22,6 +22,7 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
     private readonly IConfiguration _configuration;
     private readonly ILogger<TelegramClientPool> _logger;
     private readonly TelegramAccountUpdateHub _updateHub;
+    private readonly ISessionPathResolver _sessionPathResolver;
     private bool _disposed;
     private static int _wtelegramLogConfigured;
     private readonly ConcurrentDictionary<int, UpdateManager> _updateManagers = new();
@@ -29,11 +30,13 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
     public TelegramClientPool(
         IConfiguration configuration,
         ILogger<TelegramClientPool> logger,
-        TelegramAccountUpdateHub updateHub)
+        TelegramAccountUpdateHub updateHub,
+        ISessionPathResolver sessionPathResolver)
     {
         _configuration = configuration;
         _logger = logger;
         _updateHub = updateHub;
+        _sessionPathResolver = sessionPathResolver;
         ConfigureWTelegramLoggingOnce();
     }
 
@@ -48,6 +51,8 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
         string? phoneNumber = null,
         long? userId = null)
     {
+        sessionPath = _sessionPathResolver.Resolve(sessionPath);
+
         if (_clients.TryGetValue(accountId, out var existingClient))
         {
             if (existingClient.User != null)

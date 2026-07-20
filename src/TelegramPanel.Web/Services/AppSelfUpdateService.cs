@@ -3,6 +3,7 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 
@@ -17,6 +18,7 @@ public sealed class AppSelfUpdateService
     private readonly IMemoryCache _cache;
     private readonly IOptionsMonitor<UpdateCheckOptions> _updateOptions;
     private readonly IOptionsMonitor<SelfUpdateOptions> _selfUpdateOptions;
+    private readonly IConfiguration _configuration;
     private readonly IWebHostEnvironment _environment;
     private readonly AppRestartService _restartService;
     private readonly ILogger<AppSelfUpdateService> _logger;
@@ -27,6 +29,7 @@ public sealed class AppSelfUpdateService
         IMemoryCache cache,
         IOptionsMonitor<UpdateCheckOptions> updateOptions,
         IOptionsMonitor<SelfUpdateOptions> selfUpdateOptions,
+        IConfiguration configuration,
         IWebHostEnvironment environment,
         AppRestartService restartService,
         ILogger<AppSelfUpdateService> logger)
@@ -35,6 +38,7 @@ public sealed class AppSelfUpdateService
         _cache = cache;
         _updateOptions = updateOptions;
         _selfUpdateOptions = selfUpdateOptions;
+        _configuration = configuration;
         _environment = environment;
         _restartService = restartService;
         _logger = logger;
@@ -167,6 +171,16 @@ public sealed class AppSelfUpdateService
             var workspaceDir = Path.Combine(workRoot, options.WorkDirectoryName.Trim().Length == 0 ? "self-update" : options.WorkDirectoryName.Trim());
             var currentDir = Path.Combine(workRoot, options.CurrentDirectoryName.Trim().Length == 0 ? "app-current" : options.CurrentDirectoryName.Trim());
             var backupDir = Path.Combine(workRoot, options.BackupDirectoryName.Trim().Length == 0 ? "app-previous" : options.BackupDirectoryName.Trim());
+
+            var unsafeStorage = FindUnsafeStoragePaths(currentDir, backupDir, workspaceDir);
+            if (unsafeStorage.Count > 0)
+            {
+                return AppSelfUpdateApplyResult.Failed(
+                    "一键更新已阻止：以下持久化数据仍位于会被轮换的程序目录中："
+                    + string.Join("；", unsafeStorage)
+                    + "。请先把路径迁移到 /data 或其它持久化卷后再更新。");
+            }
+
             Directory.CreateDirectory(workspaceDir);
 
             var stageDir = Path.Combine(workspaceDir, $"stage-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}");
@@ -184,8 +198,10 @@ public sealed class AppSelfUpdateService
                 if (!File.Exists(entryDll))
                     return AppSelfUpdateApplyResult.Failed("更新包结构无效：缺少 TelegramPanel.Web.dll");
 
+                // 先把完整状态写入暂存目录，再原子切换目录。
+                // 避免目录已切换但 marker 写入失败，导致新版本无法启动或无法回滚。
+                WriteSelfUpdateMarkers(stageDir, check);
                 PromoteCurrentDirectory(stageDir, currentDir, backupDir);
-                WriteSelfUpdateMarker(currentDir, check);
                 stageDir = string.Empty;
 
                 var restartDelaySeconds = options.RestartDelaySeconds;
@@ -275,7 +291,9 @@ public sealed class AppSelfUpdateService
             if (Path.IsPathRooted(configured))
                 return configured;
 
-            return Path.GetFullPath(Path.Combine(_environment.ContentRootPath, configured));
+            var stableRoot = StoragePathResolver.ResolvePersistentRoot(_configuration)
+                ?? _environment.ContentRootPath;
+            return Path.GetFullPath(Path.Combine(stableRoot, configured));
         }
 
         if (Directory.Exists("/data"))
@@ -284,10 +302,73 @@ public sealed class AppSelfUpdateService
         return _environment.ContentRootPath;
     }
 
+    private List<string> FindUnsafeStoragePaths(string currentDir, string backupDir, string workspaceDir)
+    {
+        var paths = new List<(string Name, string Path)>();
+
+        try
+        {
+            var connectionString = _configuration.GetConnectionString("DefaultConnection")
+                ?? "Data Source=telegram_panel.db";
+            var dataSource = new SqliteConnectionStringBuilder(connectionString).DataSource;
+            if (!string.IsNullOrWhiteSpace(dataSource)
+                && !string.Equals(dataSource, ":memory:", StringComparison.OrdinalIgnoreCase))
+            {
+                paths.Add(("数据库", Path.IsPathRooted(dataSource)
+                    ? Path.GetFullPath(dataSource)
+                    : StoragePathResolver.ResolveWritablePath(
+                        _configuration,
+                        _environment,
+                        dataSource,
+                        "telegram_panel.db")));
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve database path before self update");
+            paths.Add(("数据库配置", _environment.ContentRootPath));
+        }
+
+        paths.Add((
+            "后台凭据",
+            StoragePathResolver.ResolveWritablePath(
+                _configuration,
+                _environment,
+                _configuration["AdminAuth:CredentialsPath"],
+                "admin_auth.json")));
+        paths.Add((
+            "Session",
+            StoragePathResolver.ResolveWritablePath(
+                _configuration,
+                _environment,
+                _configuration["Telegram:SessionsPath"],
+                "sessions")));
+
+        var replaceableRoots = new[]
+        {
+            Path.GetFullPath(currentDir),
+            Path.GetFullPath(backupDir),
+            Path.GetFullPath(workspaceDir),
+            Path.GetFullPath(_environment.ContentRootPath)
+        };
+
+        return paths
+            .Where(item => replaceableRoots.Any(root => StoragePathResolver.IsPathWithin(item.Path, root)))
+            .Select(item => $"{item.Name}={item.Path}")
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     private static void PromoteCurrentDirectory(string stageDir, string currentDir, string backupDir)
     {
+        string? archivedBackupDir = null;
         if (Directory.Exists(backupDir))
-            Directory.Delete(backupDir, recursive: true);
+        {
+            archivedBackupDir = $"{backupDir}-{DateTimeOffset.UtcNow:yyyyMMddHHmmss}";
+            if (Directory.Exists(archivedBackupDir))
+                archivedBackupDir += $"-{Guid.NewGuid():N}";
+            Directory.Move(backupDir, archivedBackupDir);
+        }
 
         var movedCurrent = false;
         try
@@ -307,13 +388,28 @@ public sealed class AppSelfUpdateService
                 Directory.Move(backupDir, currentDir);
             }
 
+            if (!string.IsNullOrWhiteSpace(archivedBackupDir)
+                && Directory.Exists(archivedBackupDir)
+                && !Directory.Exists(backupDir))
+            {
+                Directory.Move(archivedBackupDir, backupDir);
+            }
+
             throw;
         }
     }
 
-    private static void WriteSelfUpdateMarker(string currentDir, AppSelfUpdateInfo check)
+    private static void WriteSelfUpdateMarkers(string currentDir, AppSelfUpdateInfo check)
     {
-        var markerPath = Path.Combine(currentDir, ".telegram-panel-self-update");
+        // 发布包不应携带上一次启动留下的状态；删除失败必须中止更新，
+        // 否则残留 confirmed 会让入口脚本误把未经验证的新版本视为可用。
+        var attemptedPath = Path.Combine(currentDir, SelfUpdateStartupCoordinator.AttemptedMarkerFileName);
+        var confirmedPath = Path.Combine(currentDir, SelfUpdateStartupCoordinator.ConfirmedMarkerFileName);
+        if (File.Exists(attemptedPath))
+            File.Delete(attemptedPath);
+        if (File.Exists(confirmedPath))
+            File.Delete(confirmedPath);
+
         var payload = new
         {
             version = check.LatestVersion,
@@ -323,7 +419,8 @@ public sealed class AppSelfUpdateService
         };
 
         var json = JsonSerializer.Serialize(payload, JsonOptions);
-        File.WriteAllText(markerPath, json);
+        File.WriteAllText(Path.Combine(currentDir, SelfUpdateStartupCoordinator.PendingMarkerFileName), json);
+        File.WriteAllText(Path.Combine(currentDir, SelfUpdateStartupCoordinator.LegacyMarkerFileName), json);
     }
 
     private static void TryDeleteDirectory(string path)
