@@ -6,6 +6,7 @@ using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Services.Proxy;
 using TelegramPanel.Data;
 using TelegramPanel.Data.Entities;
+using TelegramPanel.Web.Api;
 using WTelegram;
 using Xunit;
 
@@ -135,6 +136,135 @@ public sealed class WarpLifecycleRegressionTests
         var status = await manager.GetStatusAsync();
 
         Assert.False(status.Enabled);
+    }
+
+    [Fact]
+    public async Task WARP运行状态公开已配置的默认协议()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        var manager = CreateManager(
+            db,
+            new FakeWarpDockerClient(),
+            enabled: false,
+            defaultProtocol: "socks5");
+
+        var status = await manager.GetStatusAsync();
+
+        Assert.Equal("socks5", status.DefaultProtocol);
+    }
+
+    [Fact]
+    public async Task 单次创建WARP可以覆盖系统默认协议()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var docker = new FakeWarpDockerClient
+        {
+            StartError = new InvalidOperationException("stop after capturing settings")
+        };
+        var manager = CreateManager(
+            db,
+            docker,
+            enabled: true,
+            defaultProtocol: "http");
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            manager.CreateAsync(requestId: "protocol-override", protocol: " SOCKS5 "));
+
+        Assert.Equal("socks5", docker.LastCreatedProtocol);
+        Assert.Empty(await db.OutboundProxies.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task 单次创建WARP拒绝不支持的协议且不创建资源()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var docker = new FakeWarpDockerClient();
+        var manager = CreateManager(db, docker, enabled: true);
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            manager.CreateAsync(protocol: "mtproto"));
+
+        Assert.Contains("HTTP 或 SOCKS5", error.Message);
+        Assert.Null(docker.LastCreatedProtocol);
+        Assert.Empty(await db.WarpProfiles.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task 相同请求键不能把既有WARP静默改成另一协议()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "existing-warp",
+            Kind = "warp",
+            Protocol = "http",
+            Host = "existing-warp",
+            Port = 1080,
+            IsEnabled = true
+        };
+        var profile = Profile("existing-profile", "active", 42080);
+        profile.RequestId = "same-request";
+        profile.Proxy = proxy;
+        db.WarpProfiles.Add(profile);
+        await db.SaveChangesAsync();
+        var manager = CreateManager(db, new FakeWarpDockerClient(), enabled: false);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            manager.CreateAsync(requestId: "same-request", protocol: "socks5"));
+
+        Assert.Contains("不能改为 SOCKS5", error.Message);
+        Assert.Equal("http", (await db.OutboundProxies.AsNoTracking().SingleAsync()).Protocol);
+    }
+
+    [Fact]
+    public void WARP代理接口公开独立容器的连接状态()
+    {
+        var proxy = new OutboundProxy
+        {
+            Id = 7,
+            Name = "warp-proxy",
+            Kind = "warp",
+            Protocol = "socks5",
+            Host = "warp-proxy",
+            Port = 1080,
+            IsEnabled = true,
+            WarpProfile = new WarpProfile
+            {
+                ProfileId = "profile-7",
+                ContainerName = "warp-proxy",
+                VolumeName = "warp-data-7",
+                HostPort = 42080,
+                Status = "active",
+                WarpStatus = "on"
+            }
+        };
+
+        var dto = ProxyApiEndpoints.ToDto(proxy);
+
+        Assert.Equal("on", dto.WarpStatus);
     }
 
     [Fact]
@@ -388,13 +518,15 @@ public sealed class WarpLifecycleRegressionTests
     internal static WarpContainerManager CreateManager(
         AppDbContext db,
         FakeWarpDockerClient docker,
-        bool enabled)
+        bool enabled,
+        string defaultProtocol = "http")
     {
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["Proxy:Warp:Enabled"] = enabled.ToString(),
-                ["Proxy:Warp:DockerSocketPath"] = Path.Combine(Path.GetTempPath(), "fake-docker.sock")
+                ["Proxy:Warp:DockerSocketPath"] = Path.Combine(Path.GetTempPath(), "fake-docker.sock"),
+                ["Proxy:Warp:Protocol"] = defaultProtocol
             })
             .Build();
         return new WarpContainerManager(
@@ -450,6 +582,7 @@ public sealed class WarpLifecycleRegressionTests
         public Exception? RemoveContainerError { get; set; }
         public Exception? RemoveVolumeError { get; set; }
         public int CreateVolumeCalls { get; private set; }
+        public string? LastCreatedProtocol { get; private set; }
         public IReadOnlyCollection<string> Containers => _containers.Select(x => x.Id).ToArray();
         public IReadOnlyCollection<string> Volumes => _volumes.Keys.ToArray();
         public List<string> StartedContainerReferences { get; } = new();
@@ -501,6 +634,7 @@ public sealed class WarpLifecycleRegressionTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            LastCreatedProtocol = settings.Protocol;
             var id = $"fake-container-{++_nextContainerId}";
             _containers.Add(new ContainerResource(id, containerName, profileId));
             return Task.FromResult(id);

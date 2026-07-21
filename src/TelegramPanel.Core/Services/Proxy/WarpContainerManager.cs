@@ -70,7 +70,8 @@ public sealed class WarpContainerManager
                 "WARP 仅支持在 Linux Docker 环境中运行",
                 settings.Image,
                 settings.Network,
-                settings.ProxyHostMode);
+                settings.ProxyHostMode,
+                settings.Protocol);
         }
 
         if (!settings.Enabled)
@@ -83,7 +84,8 @@ public sealed class WarpContainerManager
                 "WARP 未启用，请设置 Proxy:Warp:Enabled=true",
                 settings.Image,
                 settings.Network,
-                settings.ProxyHostMode);
+                settings.ProxyHostMode,
+                settings.Protocol);
         }
 
         try
@@ -98,7 +100,8 @@ public sealed class WarpContainerManager
                 null,
                 settings.Image,
                 settings.Network,
-                settings.ProxyHostMode);
+                settings.ProxyHostMode,
+                settings.Protocol);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -114,16 +117,19 @@ public sealed class WarpContainerManager
                 SafeError(ex),
                 settings.Image,
                 settings.Network,
-                settings.ProxyHostMode);
+                settings.ProxyHostMode,
+                settings.Protocol);
         }
     }
 
     public async Task<OutboundProxy> CreateAsync(
         string? displayName = null,
         string? requestId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? protocol = null)
     {
         displayName = NormalizeDisplayName(displayName);
+        protocol = NormalizeRequestedProtocol(protocol);
         await LifecycleLock.WaitAsync(cancellationToken);
         try
         {
@@ -137,6 +143,13 @@ public sealed class WarpContainerManager
                 if (existing?.Proxy is { IsEnabled: true } existingProxy
                     && existing.Status == "active")
                 {
+                    if (protocol != null
+                        && !string.Equals(existingProxy.Protocol, protocol, StringComparison.Ordinal))
+                    {
+                        throw new InvalidOperationException(
+                            $"该 WARP 请求已按 {existingProxy.Protocol.ToUpperInvariant()} 协议创建，不能改为 {protocol.ToUpperInvariant()}");
+                    }
+
                     return existingProxy;
                 }
                 if (existing != null)
@@ -167,6 +180,7 @@ public sealed class WarpContainerManager
                 throw new InvalidOperationException(status.Error ?? "Docker WARP 服务不可用");
 
             settings ??= WarpSettings.From(_configuration);
+            settings = settings with { Protocol = protocol ?? settings.Protocol };
             using var operationTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             operationTimeout.CancelAfter(TimeSpan.FromMinutes(12));
             var token = operationTimeout.Token;
@@ -579,6 +593,22 @@ public sealed class WarpContainerManager
             throw new ArgumentException("WARP 显示名不能超过 200 个字符", nameof(displayName));
 
         return displayName;
+    }
+
+    private static string? NormalizeRequestedProtocol(string? protocol)
+    {
+        if (string.IsNullOrWhiteSpace(protocol))
+            return null;
+
+        var normalized = protocol.Trim().ToLowerInvariant();
+        if (normalized is not (OutboundProxyProtocols.Http or OutboundProxyProtocols.Socks5))
+        {
+            throw new ArgumentException(
+                "WARP 代理协议仅支持 HTTP 或 SOCKS5",
+                nameof(protocol));
+        }
+
+        return normalized;
     }
 
     private static string SafeError(Exception exception)

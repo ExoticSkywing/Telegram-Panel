@@ -298,6 +298,7 @@ public sealed partial class ProxyManagementService
         try
         {
             var proxy = await _db.OutboundProxies
+                .Include(x => x.WarpProfile)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new KeyNotFoundException("代理不存在");
             return await TestAsyncCore(proxy, cancellationToken);
@@ -356,8 +357,9 @@ public sealed partial class ProxyManagementService
     public Task<OutboundProxy> CreateWarpAsync(
         string? name,
         string? requestId,
-        CancellationToken cancellationToken = default) =>
-        _warpManager.CreateAsync(name, requestId, cancellationToken);
+        CancellationToken cancellationToken = default,
+        string? protocol = null) =>
+        _warpManager.CreateAsync(name, requestId, cancellationToken, protocol);
 
     public Task<WarpRuntimeStatus> GetWarpStatusAsync(
         CancellationToken cancellationToken = default) =>

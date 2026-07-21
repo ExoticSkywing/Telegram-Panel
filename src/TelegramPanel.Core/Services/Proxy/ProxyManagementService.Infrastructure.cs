@@ -68,6 +68,16 @@ public sealed partial class ProxyManagementService
                 proxy.EgressIsp = null;
             }
 
+            if (proxy.WarpProfile is { } warpProfile)
+            {
+                warpProfile.EgressIp = result.Success ? result.Ip : null;
+                warpProfile.Country = result.Success ? result.Country : null;
+                warpProfile.WarpStatus = result.Success ? result.WarpStatus : null;
+                warpProfile.LastError = result.Error;
+                warpProfile.LastCheckedAtUtc = result.CheckedAtUtc;
+                warpProfile.UpdatedAtUtc = DateTime.UtcNow;
+            }
+
             await _db.SaveChangesAsync(cancellationToken);
             return proxy;
         }

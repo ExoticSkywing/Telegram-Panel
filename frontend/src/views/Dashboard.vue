@@ -37,9 +37,11 @@
               <div class="egress-status-content">
                 <div>
                   面板公网出口：<strong>{{ egress?.success ? egress.ip || '未知' : (egress || egressError) ? '检测失败' : '检测中' }}</strong>
-                  <el-tag v-if="egress?.warpStatus" size="small" :type="egress.warpStatus === 'on' || egress.warpStatus === 'plus' ? 'success' : 'info'">
-                    WARP {{ egress.warpStatus }}
-                  </el-tag>
+                  <el-tooltip v-if="egress?.warpStatus" :content="panelWarpStatusHelp" placement="top">
+                    <el-tag size="small" :type="isWarpConnected(egress.warpStatus) ? 'success' : 'info'">
+                      {{ warpStatusLabel(egress.warpStatus) }}
+                    </el-tag>
+                  </el-tooltip>
                 </div>
                 <div class="cell-sub">{{ egressDescription }}</div>
               </div>
@@ -109,6 +111,7 @@ import { panelApi } from '@/api/panel'
 import type { BatchTask, DashboardSummary, NetworkEgress } from '@/api/types'
 import StatusTag from '@/components/StatusTag.vue'
 import { taskProgress } from '@/utils/format'
+import { ipVersionLabel, isWarpConnected, warpStatusLabel } from '@/utils/networkEgress'
 
 const router = useRouter()
 const loading = ref(false)
@@ -141,7 +144,13 @@ const egressDescription = computed(() => {
   if (!egress.value.success) return egress.value.error || '无法获取出口信息'
   const location = [egress.value.country, egress.value.city, egress.value.isp].filter(Boolean).join(' / ')
   const latency = egress.value.latencyMs == null ? '' : `${egress.value.latencyMs} ms`
-  return [location, latency].filter(Boolean).join(' · ') || '位置未知'
+  return [ipVersionLabel(egress.value.ip), location, latency].filter(Boolean).join(' · ') || '位置未知'
+})
+const panelWarpStatusHelp = computed(() => {
+  if (isWarpConnected(egress.value?.warpStatus)) {
+    return '这里只表示面板服务自身的公网出口已使用 Cloudflare WARP。'
+  }
+  return '“未使用 WARP”只表示面板服务自身直连，不代表代理管理中的独立 WARP 失效。'
 })
 
 async function load(options: { silent?: boolean } = {}) {

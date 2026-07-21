@@ -129,4 +129,5 @@ public sealed record WarpRuntimeStatus(
     string? Error,
     string Image,
     string Network,
-    string ProxyHostMode);
+    string ProxyHostMode,
+    string DefaultProtocol);

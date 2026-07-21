@@ -7,18 +7,24 @@
           <div class="network-label">面板公网出口</div>
           <div class="network-value">
             <span>{{ panelEgressText }}</span>
-            <el-tag
+            <el-tooltip
               v-if="!egressLoading && !panelEgressError && panelEgress?.warpStatus"
-              size="small"
-              :type="isWarpOn(panelEgress.warpStatus) ? 'success' : 'info'"
+              :content="panelWarpStatusHelp"
+              placement="top"
             >
-              WARP {{ panelEgress.warpStatus }}
-            </el-tag>
+              <el-tag
+                size="small"
+                :type="isWarpConnected(panelEgress.warpStatus) ? 'success' : 'info'"
+              >
+                {{ warpStatusLabel(panelEgress.warpStatus) }}
+              </el-tag>
+            </el-tooltip>
           </div>
           <div class="network-meta">
             {{ panelEgressMeta }}
             <span v-if="!egressLoading && !panelEgressError && panelEgress?.latencyMs != null"> · {{ panelEgress.latencyMs }} ms</span>
           </div>
+          <div class="network-scope-note">这里只检测面板服务自身；各代理的独立出口见下方列表。</div>
         </div>
       </div>
       <el-button
@@ -81,12 +87,21 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="出口 IP" min-width="190">
+        <el-table-column label="公网出口 IP" min-width="210">
           <template #default="{ row }">
-            <div>{{ row.egressIp || '-' }}</div>
-            <div v-if="row.egressCountry || row.egressCity" class="cell-sub">
-              {{ [row.egressCountry, row.egressCity].filter(Boolean).join(' / ') }}
+            <div class="monospace">{{ egressIpText(row) }}</div>
+            <div v-if="row.egressIp" class="cell-sub">
+              {{ egressIpMeta(row) }}
             </div>
+            <el-tag
+              v-if="row.kind === 'warp'"
+              class="warp-egress-tag"
+              :type="warpProxyStatusType(row.warpStatus)"
+              size="small"
+              effect="plain"
+            >
+              {{ warpStatusLabel(row.warpStatus) }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="检测" min-width="170">
@@ -319,10 +334,20 @@
         <el-form-item label="代理名称">
           <el-input v-model="warpDialog.name" maxlength="80" placeholder="留空自动命名" />
         </el-form-item>
+        <el-form-item label="代理协议">
+          <el-radio-group v-model="warpDialog.protocol">
+            <el-radio-button value="http">HTTP</el-radio-button>
+            <el-radio-button value="socks5">SOCKS5</el-radio-button>
+          </el-radio-group>
+          <div class="form-hint">
+            系统默认：{{ protocolLabel(warpStatus?.defaultProtocol || 'http') }}；本选项只覆盖这一次创建。
+            WARP 容器同一端口同时支持 HTTP 和 SOCKS5。
+          </div>
+        </el-form-item>
         <el-alert
           v-if="warpStatus"
           :title="`镜像：${warpStatus.image}`"
-          :description="`网络：${warpStatus.network} · 连接方式：${warpStatus.proxyHostMode}`"
+          :description="`网络：${warpStatus.network} · 连接方式：${warpStatus.proxyHostMode} · 默认协议：${protocolLabel(warpStatus.defaultProtocol)}`"
           type="info"
           :closable="false"
           show-icon
@@ -355,9 +380,11 @@ import type {
   ProxyKind,
   ProxyProtocol,
   SaveOutboundProxyRequest,
+  WarpProxyProtocol,
   WarpRuntimeStatus,
 } from '@/api/types'
 import { formatTime } from '@/utils/format'
+import { ipVersionLabel, isWarpConnected, warpStatusLabel } from '@/utils/networkEgress'
 
 const loading = ref(false)
 const egressLoading = ref(false)
@@ -417,6 +444,7 @@ const warpDialog = reactive({
   creating: false,
   name: '',
   requestId: '',
+  protocol: 'http' as WarpProxyProtocol,
 })
 
 const warpUnavailable = computed(() => !warpStatus.value
@@ -450,7 +478,17 @@ const panelEgressText = computed(() => {
 const panelEgressMeta = computed(() => {
   if (egressLoading.value) return '正在检测网络出口'
   if (panelEgressError.value) return panelEgressError.value
-  return egressLocation(panelEgress.value)
+  return [ipVersionLabel(panelEgress.value?.ip), egressLocation(panelEgress.value)]
+    .filter(Boolean)
+    .join(' · ')
+})
+
+const panelWarpStatusHelp = computed(() => {
+  const status = panelEgress.value?.warpStatus
+  if (isWarpConnected(status)) {
+    return '这里只表示面板服务自身的公网出口已使用 Cloudflare WARP；下方代理仍会分别检测。'
+  }
+  return '“未使用 WARP”只表示面板服务自身直连，不代表下方独立 WARP 代理失效。'
 })
 
 function normalizeOptional(value?: string | null) {
@@ -492,8 +530,24 @@ function testStatusType(status?: string | null) {
   return 'info'
 }
 
-function isWarpOn(status?: string | null) {
-  return status === 'on' || status === 'plus'
+function warpProxyStatusType(status?: string | null) {
+  if (!status) return 'info'
+  return isWarpConnected(status) ? 'success' : 'danger'
+}
+
+function egressIpText(proxy: OutboundProxy) {
+  if (proxy.egressIp) return proxy.egressIp
+  const status = proxy.testStatus?.toLowerCase()
+  return status === 'fail' || status === 'failed' || status === 'error'
+    ? '检测失败'
+    : '尚未检测'
+}
+
+function egressIpMeta(proxy: OutboundProxy) {
+  const location = [proxy.egressCountry, proxy.egressCity, proxy.egressIsp]
+    .filter(Boolean)
+    .join(' / ')
+  return [ipVersionLabel(proxy.egressIp), location].filter(Boolean).join(' · ')
 }
 
 function egressLocation(egress?: NetworkEgress | null) {
@@ -758,6 +812,7 @@ function openWarpCreate() {
   }
   warpCreateOperationToken += 1
   warpDialog.name = ''
+  warpDialog.protocol = warpStatus.value?.defaultProtocol === 'socks5' ? 'socks5' : 'http'
   warpDialog.requestId = typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `warp-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -774,9 +829,10 @@ async function createWarp() {
     const created = await panelApi.createWarpProxies({
       name,
       requestId,
+      protocol: warpDialog.protocol,
     })
     if (operationToken !== warpCreateOperationToken) return
-    ElMessage.success(`WARP 代理“${created.name}”已创建`)
+    ElMessage.success(`WARP 代理“${created.name}”已创建（${protocolLabel(created.protocol)}）`)
     warpDialog.visible = false
     warpDialog.requestId = ''
   } finally {
@@ -848,6 +904,12 @@ onMounted(() => {
   overflow-wrap: anywhere;
 }
 
+.network-scope-note {
+  margin-top: 3px;
+  color: var(--tp-muted);
+  font-size: 12px;
+}
+
 .warp-runtime {
   gap: 8px;
   white-space: nowrap;
@@ -860,6 +922,18 @@ onMounted(() => {
 
 .monospace {
   font-family: Consolas, "Microsoft YaHei", monospace;
+}
+
+.warp-egress-tag {
+  margin-top: 4px;
+}
+
+.form-hint {
+  width: 100%;
+  margin-top: 6px;
+  color: var(--tp-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .form-grid {

@@ -5,6 +5,7 @@ services:
       Proxy__Warp__DockerSocketPath: "/var/run/docker.sock"
       Proxy__Warp__Network: "${TP_WARP_DOCKER_NETWORK:-telegram-panel_default}"
       Proxy__Warp__ProxyHostMode: "container"
+      Proxy__Warp__Protocol: "${TP_WARP_PROXY_PROTOCOL:-http}"
     volumes:
       # Docker Socket 可管理宿主全部容器，仅在可信主机显式叠加本文件。
       - /var/run/docker.sock:/var/run/docker.sock

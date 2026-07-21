@@ -15,6 +15,7 @@ export interface OperationResult {
 export type ProxyKind = 'manual' | 'resin' | 'warp'
 
 export type ProxyProtocol = 'http' | 'socks5' | 'mtproto'
+export type WarpProxyProtocol = Extract<ProxyProtocol, 'http' | 'socks5'>
 
 export interface NetworkEgress {
   success: boolean
@@ -50,6 +51,7 @@ export interface OutboundProxy {
   egressCountry?: string | null
   egressCity?: string | null
   egressIsp?: string | null
+  warpStatus?: string | null
   lastTestedAtUtc?: string | null
   firstBoundAtUtc?: string | null
   accountCount?: number
@@ -89,11 +91,13 @@ export interface WarpRuntimeStatus {
   image: string
   network: string
   proxyHostMode: string
+  defaultProtocol: WarpProxyProtocol
 }
 
 export interface CreateWarpProxyRequest {
   name?: string | null
   requestId?: string | null
+  protocol?: WarpProxyProtocol | null
 }
 
 export type AccountProxyStrategy = 'direct' | 'global' | 'existing' | 'warp_per_account'

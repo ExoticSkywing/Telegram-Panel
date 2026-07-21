@@ -158,7 +158,12 @@ docker compose -f docker-compose.yml -f docker-compose.warp.yml up -d
 
 ```dotenv
 TP_WARP_DOCKER_NETWORK=实际的_Docker_网络名
+TP_WARP_PROXY_PROTOCOL=socks5
 ```
+
+`TP_WARP_PROXY_PROTOCOL` 用于导入、登录和批量绑定自动创建 WARP 时的默认协议，可选
+`http` 或 `socks5`，未设置时默认 `http`。WARP 镜像的 GOST 监听端口同时支持
+HTTP 与 SOCKS5；代理管理中的一键创建弹窗还可以只覆盖本次创建的协议。
 
 生产环境建议通过 `Proxy__Warp__Image` 固定经过审计的镜像 digest，而不是长期跟随可变的 `latest` 标签。
 

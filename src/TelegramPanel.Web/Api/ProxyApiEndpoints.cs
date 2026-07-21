@@ -160,7 +160,8 @@ public static class ProxyApiEndpoints
             var proxy = await service.CreateWarpAsync(
                 request.Name,
                 request.RequestId,
-                cancellationToken);
+                cancellationToken,
+                request.Protocol);
             return Results.Ok(ToDto(proxy));
         }
         catch (Exception ex) when (IsClientError(ex))
@@ -269,6 +270,7 @@ public static class ProxyApiEndpoints
             proxy.EgressCountry,
             proxy.EgressCity,
             proxy.EgressIsp,
+            proxy.WarpProfile?.WarpStatus,
             proxy.LastTestedAtUtc,
             proxy.FirstBoundAtUtc,
             proxy.Accounts?.Count ?? 0,
@@ -321,7 +323,10 @@ public sealed record ProxySaveRequestDto(
     bool ClearResinAdminToken = false);
 
 public sealed record ProxyImportRequestDto(string? Text, bool TestAfterImport = false);
-public sealed record WarpCreateRequestDto(string? Name, string? RequestId);
+public sealed record WarpCreateRequestDto(
+    string? Name,
+    string? RequestId,
+    string? Protocol = null);
 public sealed record AccountProxyBindingRequestDto(
     string? Strategy,
     int? ProxyId,
@@ -352,6 +357,7 @@ public sealed record ProxyDto(
     string? EgressCountry,
     string? EgressCity,
     string? EgressIsp,
+    string? WarpStatus,
     DateTime? LastTestedAtUtc,
     DateTime? FirstBoundAtUtc,
     int AccountCount,
