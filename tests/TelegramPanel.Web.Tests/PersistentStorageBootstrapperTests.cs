@@ -1,6 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
@@ -13,204 +10,7 @@ namespace TelegramPanel.Web.Tests;
 public sealed class PersistentStorageBootstrapperTests
 {
     [Fact]
-    public void Initialize_RestoresBestDatabaseAndBacksUpEmptyTarget()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var currentRoot = Path.Combine(root, "app-current");
-            var persistentRoot = Path.Combine(root, "data");
-            var invalidRoot = Path.Combine(root, "app-previous-newest-invalid");
-            var oneAccountRoot = Path.Combine(root, "app-previous-newer");
-            var threeAccountsRoot = Path.Combine(root, "app-previous-older");
-            Directory.CreateDirectory(currentRoot);
-            Directory.CreateDirectory(persistentRoot);
-            Directory.CreateDirectory(invalidRoot);
-            Directory.CreateDirectory(oneAccountRoot);
-            Directory.CreateDirectory(threeAccountsRoot);
-
-            var targetDatabase = Path.Combine(persistentRoot, "telegram_panel.db");
-            var invalidDatabase = Path.Combine(invalidRoot, "telegram_panel.db");
-            var oneAccountDatabase = Path.Combine(oneAccountRoot, "telegram_panel.db");
-            var threeAccountsDatabase = Path.Combine(threeAccountsRoot, "telegram-panel.db");
-            CreateDatabase(targetDatabase, accountCount: 0);
-            File.WriteAllText(invalidDatabase, "这不是 SQLite 数据库");
-            CreateDatabase(oneAccountDatabase, accountCount: 1);
-            CreateDatabase(threeAccountsDatabase, accountCount: 3);
-
-            var now = DateTime.UtcNow;
-            File.SetLastWriteTimeUtc(invalidDatabase, now);
-            File.SetLastWriteTimeUtc(oneAccountDatabase, now.AddMinutes(-1));
-            File.SetLastWriteTimeUtc(threeAccountsDatabase, now.AddMinutes(-2));
-
-            var configuration = CreateConfiguration(persistentRoot);
-            var paths = PersistentStorageBootstrapper.Initialize(
-                configuration,
-                new TestEnvironment(currentRoot));
-
-            Assert.Equal(3, ReadAccountCount(paths.DatabasePath));
-            Assert.Equal(1, ReadAccountCount(oneAccountDatabase));
-            Assert.Equal(3, ReadAccountCount(threeAccountsDatabase));
-
-            var backups = Directory.GetFiles(
-                persistentRoot,
-                "telegram_panel.db.before-storage-recovery-*");
-            var backup = Assert.Single(backups);
-            Assert.Equal(0, ReadAccountCount(backup));
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_DoesNotOverwriteDatabaseThatContainsAccounts()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var legacyRoot = Path.Combine(root, "old-app");
-            var persistentRoot = Path.Combine(root, "persistent");
-            Directory.CreateDirectory(legacyRoot);
-            Directory.CreateDirectory(persistentRoot);
-            CreateDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), accountCount: 5);
-            var targetDatabase = Path.Combine(persistentRoot, "telegram_panel.db");
-            CreateDatabase(targetDatabase, accountCount: 2);
-
-            var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(legacyRoot));
-
-            Assert.Equal(2, ReadAccountCount(paths.DatabasePath));
-            Assert.Empty(Directory.GetFiles(
-                persistentRoot,
-                "telegram_panel.db.before-storage-recovery-*"));
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_DoesNotOverwriteDatabaseThatContainsOtherBusinessData()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var legacyRoot = Path.Combine(root, "old-app");
-            var persistentRoot = Path.Combine(root, "persistent");
-            Directory.CreateDirectory(legacyRoot);
-            Directory.CreateDirectory(persistentRoot);
-            CreateDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), accountCount: 5);
-            var targetDatabase = Path.Combine(persistentRoot, "telegram_panel.db");
-            CreateDatabase(targetDatabase, accountCount: 0);
-            AddBusinessData(targetDatabase);
-
-            var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(legacyRoot));
-
-            Assert.Equal(0, ReadAccountCount(paths.DatabasePath));
-            Assert.Equal(1, ReadRowCount(paths.DatabasePath, "DataDictionaries"));
-            Assert.Empty(Directory.GetFiles(
-                persistentRoot,
-                "telegram_panel.db.before-storage-recovery-*"));
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_RestoresZeroLengthTargetAfterBackingItUp()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var legacyRoot = Path.Combine(root, "old-app");
-            var persistentRoot = Path.Combine(root, "persistent");
-            Directory.CreateDirectory(legacyRoot);
-            Directory.CreateDirectory(persistentRoot);
-            CreateDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), accountCount: 2);
-            var targetDatabase = Path.Combine(persistentRoot, "telegram_panel.db");
-            File.WriteAllBytes(targetDatabase, []);
-
-            var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(legacyRoot));
-
-            Assert.Equal(2, ReadAccountCount(paths.DatabasePath));
-            var backup = Assert.Single(Directory.GetFiles(
-                persistentRoot,
-                "telegram_panel.db.before-storage-recovery-*"));
-            Assert.Equal(0, new FileInfo(backup).Length);
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_DoesNotOverwriteNonEmptyCorruptedTarget()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var legacyRoot = Path.Combine(root, "old-app");
-            var persistentRoot = Path.Combine(root, "persistent");
-            Directory.CreateDirectory(legacyRoot);
-            Directory.CreateDirectory(persistentRoot);
-            CreateDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), accountCount: 2);
-            var targetDatabase = Path.Combine(persistentRoot, "telegram_panel.db");
-            File.WriteAllText(targetDatabase, "not-a-sqlite-database");
-
-            var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(legacyRoot));
-
-            Assert.Equal("not-a-sqlite-database", File.ReadAllText(paths.DatabasePath));
-            Assert.Empty(Directory.GetFiles(
-                persistentRoot,
-                "telegram_panel.db.before-storage-recovery-*"));
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_RestoresHyphenatedDatabaseFromWritableRoot()
-    {
-        var root = CreateTempDirectory();
-        try
-        {
-            var currentRoot = Path.Combine(root, "app-current");
-            var persistentRoot = Path.Combine(root, "data");
-            Directory.CreateDirectory(currentRoot);
-            Directory.CreateDirectory(persistentRoot);
-            var sourceDatabase = Path.Combine(persistentRoot, "telegram-panel.db");
-            CreateDatabase(sourceDatabase, accountCount: 4);
-
-            var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(currentRoot));
-
-            Assert.Equal(4, ReadAccountCount(paths.DatabasePath));
-            Assert.Equal(4, ReadAccountCount(sourceDatabase));
-        }
-        finally
-        {
-            TryDeleteDirectory(root);
-        }
-    }
-
-    [Fact]
-    public void Initialize_RestoresMissingFilesFromLegacyContentRoot()
+    public void Initialize_MigratesLegacyFilesWithoutOverwritingExistingTargets()
     {
         var root = CreateTempDirectory();
         try
@@ -220,26 +20,30 @@ public sealed class PersistentStorageBootstrapperTests
             Directory.CreateDirectory(legacyRoot);
             Directory.CreateDirectory(persistentRoot);
             Directory.CreateDirectory(Path.Combine(legacyRoot, "sessions"));
-            CreateDatabase(Path.Combine(legacyRoot, "telegram-panel.db"), accountCount: 2);
-            WriteCredentials(
-                Path.Combine(legacyRoot, "admin_auth.json"),
-                "custom-user",
-                "custom-password",
-                mustChangePassword: false);
-            File.WriteAllText(
-                Path.Combine(legacyRoot, "sessions", "100.session"),
-                "legacy-session");
+            Directory.CreateDirectory(Path.Combine(persistentRoot, "sessions"));
 
-            var configuration = CreateConfiguration(persistentRoot);
+            CreateSqliteDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), "legacy-db");
+            File.WriteAllText(
+                Path.Combine(legacyRoot, "admin_auth.json"),
+                CreateCredentialJson("legacy-user"));
+            File.WriteAllText(Path.Combine(legacyRoot, "sessions", "100.session"), "legacy-session");
+
+            var configuration = new ConfigurationManager();
+            configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Storage:RootPath"] = persistentRoot,
+                ["ConnectionStrings:DefaultConnection"] = "Data Source=telegram_panel.db",
+                ["AdminAuth:CredentialsPath"] = "admin_auth.json",
+                ["Telegram:SessionsPath"] = "sessions"
+            });
+
             var paths = PersistentStorageBootstrapper.Initialize(
                 configuration,
                 new TestEnvironment(legacyRoot));
 
-            Assert.Equal(2, ReadAccountCount(paths.DatabasePath));
-            Assert.Equal("custom-user", ReadCredentialUsername(paths.CredentialsPath));
-            Assert.Equal(
-                "legacy-session",
-                File.ReadAllText(Path.Combine(paths.SessionsPath, "100.session")));
+            Assert.Equal("legacy-db", ReadDatabaseMarker(paths.DatabasePath));
+            Assert.Equal("legacy-user", ReadCredentialUsername(paths.CredentialsPath));
+            Assert.Equal("legacy-session", File.ReadAllText(Path.Combine(paths.SessionsPath, "100.session")));
             Assert.Equal(paths.SessionsPath, configuration["Telegram:SessionsPath"]);
             Assert.Equal(paths.CredentialsPath, configuration["AdminAuth:CredentialsPath"]);
         }
@@ -250,41 +54,39 @@ public sealed class PersistentStorageBootstrapperTests
     }
 
     [Fact]
-    public void Initialize_ReplacesGeneratedDefaultCredentialsButPreservesSource()
+    public void Initialize_RestoresFromPreviousSelfUpdateDirectory()
     {
         var root = CreateTempDirectory();
         try
         {
             var currentRoot = Path.Combine(root, "app-current");
             var previousRoot = Path.Combine(root, "app-previous");
-            var persistentRoot = Path.Combine(root, "data");
             Directory.CreateDirectory(currentRoot);
             Directory.CreateDirectory(previousRoot);
-            Directory.CreateDirectory(persistentRoot);
+            Directory.CreateDirectory(Path.Combine(previousRoot, "sessions"));
+            CreateSqliteDatabase(Path.Combine(previousRoot, "telegram_panel.db"), "previous-db");
+            File.WriteAllText(
+                Path.Combine(previousRoot, "admin_auth.json"),
+                CreateCredentialJson("previous-user"));
+            File.WriteAllText(Path.Combine(previousRoot, "sessions", "200.session"), "previous-session");
 
-            var targetCredentials = Path.Combine(persistentRoot, "admin_auth.json");
-            var sourceCredentials = Path.Combine(previousRoot, "admin_auth.json");
-            WriteCredentials(
-                targetCredentials,
-                "tgpanel",
-                "tgpanel123",
-                mustChangePassword: true);
-            WriteCredentials(
-                sourceCredentials,
-                "restored-user",
-                "restored-password",
-                mustChangePassword: false);
+            var configuration = new ConfigurationManager();
+            configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Storage:RootPath"] = root,
+                ["ConnectionStrings:DefaultConnection"] = "Data Source=telegram_panel.db",
+                ["AdminAuth:CredentialsPath"] = "admin_auth.json",
+                ["Telegram:SessionsPath"] = "sessions"
+            });
 
             var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
+                configuration,
                 new TestEnvironment(currentRoot));
 
-            Assert.Equal("restored-user", ReadCredentialUsername(paths.CredentialsPath));
-            Assert.Equal("restored-user", ReadCredentialUsername(sourceCredentials));
-            var backup = Assert.Single(Directory.GetFiles(
-                persistentRoot,
-                "admin_auth.json.before-storage-recovery-*"));
-            Assert.Equal("tgpanel", ReadCredentialUsername(backup));
+            Assert.Equal("previous-db", ReadDatabaseMarker(paths.DatabasePath));
+            Assert.Equal("previous-user", ReadCredentialUsername(paths.CredentialsPath));
+            Assert.Equal("previous-session", File.ReadAllText(Path.Combine(paths.SessionsPath, "200.session")));
+            Assert.Equal("previous-db", ReadDatabaseMarker(Path.Combine(previousRoot, "telegram_panel.db")));
         }
         finally
         {
@@ -293,7 +95,7 @@ public sealed class PersistentStorageBootstrapperTests
     }
 
     [Fact]
-    public void Initialize_DoesNotOverwriteUserModifiedCredentials()
+    public void Initialize_DoesNotOverwriteExistingPersistentFiles()
     {
         var root = CreateTempDirectory();
         try
@@ -302,26 +104,21 @@ public sealed class PersistentStorageBootstrapperTests
             var persistentRoot = Path.Combine(root, "persistent");
             Directory.CreateDirectory(legacyRoot);
             Directory.CreateDirectory(persistentRoot);
-            WriteCredentials(
-                Path.Combine(legacyRoot, "admin_auth.json"),
-                "legacy-user",
-                "legacy-password",
-                mustChangePassword: false);
-            var targetCredentials = Path.Combine(persistentRoot, "admin_auth.json");
-            WriteCredentials(
-                targetCredentials,
-                "current-user",
-                "current-password",
-                mustChangePassword: false);
+            CreateSqliteDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), "legacy-db");
+            CreateSqliteDatabase(Path.Combine(persistentRoot, "telegram_panel.db"), "current-db");
+
+            var configuration = new ConfigurationManager();
+            configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Storage:RootPath"] = persistentRoot,
+                ["ConnectionStrings:DefaultConnection"] = "Data Source=telegram_panel.db"
+            });
 
             var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
+                configuration,
                 new TestEnvironment(legacyRoot));
 
-            Assert.Equal("current-user", ReadCredentialUsername(paths.CredentialsPath));
-            Assert.Empty(Directory.GetFiles(
-                persistentRoot,
-                "admin_auth.json.before-storage-recovery-*"));
+            Assert.Equal("current-db", ReadDatabaseMarker(paths.DatabasePath));
         }
         finally
         {
@@ -330,38 +127,63 @@ public sealed class PersistentStorageBootstrapperTests
     }
 
     [Fact]
-    public void Initialize_MergesSessionsFromEveryLegacyDirectoryWithoutOverwrite()
+    public void Initialize_ReplacesZeroLengthDatabaseFromValidatedLegacySnapshot()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "persistent");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+
+            CreateSqliteDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), "recovered-db");
+            var targetPath = Path.Combine(persistentRoot, "telegram_panel.db");
+            File.WriteAllBytes(targetPath, Array.Empty<byte>());
+
+            var paths = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
+
+            Assert.Equal("recovered-db", ReadDatabaseMarker(paths.DatabasePath));
+            var preservedTargets = Directory.GetFiles(
+                persistentRoot,
+                "telegram_panel.db.invalid-*",
+                SearchOption.TopDirectoryOnly);
+            var preservedTarget = Assert.Single(preservedTargets);
+            Assert.Equal(0, new FileInfo(preservedTarget).Length);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_SkipsInvalidNewerDatabaseCandidateAndRecoversOlderValidDatabase()
     {
         var root = CreateTempDirectory();
         try
         {
             var currentRoot = Path.Combine(root, "app-current");
             var previousRoot = Path.Combine(root, "app-previous");
-            var archivedRoot = Path.Combine(root, "app-previous-20260720");
-            var persistentRoot = Path.Combine(root, "data");
-            var targetSessions = Path.Combine(persistentRoot, "sessions");
-            Directory.CreateDirectory(Path.Combine(currentRoot, "sessions"));
-            Directory.CreateDirectory(Path.Combine(previousRoot, "sessions"));
-            Directory.CreateDirectory(Path.Combine(archivedRoot, "sessions.before-persistent"));
-            Directory.CreateDirectory(targetSessions);
-
-            File.WriteAllText(Path.Combine(targetSessions, "same.session"), "current-value");
-            File.WriteAllText(Path.Combine(targetSessions, "current-only.session"), "current-only");
-            File.WriteAllText(Path.Combine(currentRoot, "sessions", "from-current.session"), "from-current");
-            File.WriteAllText(Path.Combine(previousRoot, "sessions", "same.session"), "must-not-overwrite");
-            File.WriteAllText(Path.Combine(previousRoot, "sessions", "from-previous.session"), "from-previous");
-            File.WriteAllText(
-                Path.Combine(archivedRoot, "sessions.before-persistent", "from-archive.session"),
-                "from-archive");
+            Directory.CreateDirectory(currentRoot);
+            Directory.CreateDirectory(previousRoot);
+            File.WriteAllBytes(Path.Combine(currentRoot, "telegram_panel.db"), Array.Empty<byte>());
+            CreateSqliteDatabase(Path.Combine(previousRoot, "telegram_panel.db"), "previous-valid-db");
+            var reports = new List<string>();
 
             var paths = PersistentStorageBootstrapper.Initialize(
-                CreateConfiguration(persistentRoot),
-                new TestEnvironment(currentRoot));
+                CreateConfiguration(root),
+                new TestEnvironment(currentRoot),
+                reports.Add);
 
-            Assert.Equal("current-value", File.ReadAllText(Path.Combine(paths.SessionsPath, "same.session")));
-            Assert.Equal("from-current", File.ReadAllText(Path.Combine(paths.SessionsPath, "from-current.session")));
-            Assert.Equal("from-previous", File.ReadAllText(Path.Combine(paths.SessionsPath, "from-previous.session")));
-            Assert.Equal("from-archive", File.ReadAllText(Path.Combine(paths.SessionsPath, "from-archive.session")));
+            Assert.Equal("previous-valid-db", ReadDatabaseMarker(paths.DatabasePath));
+            Assert.Contains(
+                reports,
+                report => report.Contains("跳过不可用的旧数据库候选", StringComparison.Ordinal)
+                    && report.Contains("文件为空", StringComparison.Ordinal));
+            Assert.Equal(0, new FileInfo(Path.Combine(currentRoot, "telegram_panel.db")).Length);
         }
         finally
         {
@@ -370,20 +192,159 @@ public sealed class PersistentStorageBootstrapperTests
     }
 
     [Fact]
-    public void ResolvePersistentRoot_AnchorsRelativePathToStableBase()
+    public void Initialize_ReplacesZeroLengthCredentialsAndPreservesInvalidTarget()
     {
-        var relativePath = Path.Combine("relative-storage", Guid.NewGuid().ToString("N"));
-        var configuration = new ConfigurationManager();
-        configuration["Storage:RootPath"] = relativePath;
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "persistent");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+            File.WriteAllText(
+                Path.Combine(legacyRoot, "admin_auth.json"),
+                CreateCredentialJson("restored-admin"));
+            var targetPath = Path.Combine(persistentRoot, "admin_auth.json");
+            File.WriteAllBytes(targetPath, Array.Empty<byte>());
 
-        var resolved = StoragePathResolver.ResolvePersistentRoot(configuration);
-        var stableBase = OperatingSystem.IsLinux() && Directory.Exists("/data")
-            ? "/data"
-            : AppContext.BaseDirectory;
+            var paths = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
 
-        Assert.Equal(
-            Path.GetFullPath(Path.Combine(stableBase, relativePath)),
-            resolved);
+            Assert.Equal("restored-admin", ReadCredentialUsername(paths.CredentialsPath));
+            var preservedTargets = Directory.GetFiles(
+                persistentRoot,
+                "admin_auth.json.invalid-*",
+                SearchOption.TopDirectoryOnly);
+            var preservedTarget = Assert.Single(preservedTargets);
+            Assert.Equal(0, new FileInfo(preservedTarget).Length);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_ThrowsWhenExistingDatabaseIsInvalidAndNoRecoverySourceExists()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "persistent");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+            var targetPath = Path.Combine(persistentRoot, "telegram_panel.db");
+            File.WriteAllText(targetPath, "not-a-sqlite-database");
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                PersistentStorageBootstrapper.Initialize(
+                    CreateConfiguration(persistentRoot),
+                    new TestEnvironment(legacyRoot)));
+
+            Assert.Contains("未找到可恢复的旧数据库", exception.Message, StringComparison.Ordinal);
+            Assert.Equal("not-a-sqlite-database", File.ReadAllText(targetPath));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_ThrowsWhenLegacyDatabaseValidationFailsWithoutCreatingTarget()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "persistent");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+            File.WriteAllText(Path.Combine(legacyRoot, "telegram_panel.db"), "broken-legacy-db");
+            var targetPath = Path.Combine(persistentRoot, "telegram_panel.db");
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                PersistentStorageBootstrapper.Initialize(
+                    CreateConfiguration(persistentRoot),
+                    new TestEnvironment(legacyRoot)));
+
+            Assert.Contains("全部未通过完整性校验", exception.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(targetPath));
+            Assert.Equal(
+                "broken-legacy-db",
+                File.ReadAllText(Path.Combine(legacyRoot, "telegram_panel.db")));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_RecoversCommittedWalDataAsConsistentSnapshot()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "persistent");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+            var sourcePath = Path.Combine(legacyRoot, "telegram_panel.db");
+
+            using var source = new SqliteConnection($"Data Source={sourcePath}");
+            source.Open();
+            ExecuteNonQuery(source, "PRAGMA journal_mode=WAL;");
+            ExecuteNonQuery(source, "PRAGMA wal_autocheckpoint=0;");
+            ExecuteNonQuery(source, "CREATE TABLE RecoveryMarker (Value TEXT NOT NULL);");
+            ExecuteNonQuery(source, "INSERT INTO RecoveryMarker (Value) VALUES ('wal-db');");
+            Assert.True(File.Exists(sourcePath + "-wal"));
+
+            var paths = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
+
+            Assert.Equal("wal-db", ReadDatabaseMarker(paths.DatabasePath));
+            Assert.False(File.Exists(paths.DatabasePath + "-wal"));
+            Assert.False(File.Exists(paths.DatabasePath + "-shm"));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_MergesMissingSessionsFromAllLegacyDirectories()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var currentRoot = Path.Combine(root, "app-current");
+            var previousRoot = Path.Combine(root, "app-previous");
+            var sessionsRoot = Path.Combine(root, "sessions");
+            Directory.CreateDirectory(Path.Combine(currentRoot, "sessions"));
+            Directory.CreateDirectory(Path.Combine(previousRoot, "sessions"));
+            Directory.CreateDirectory(sessionsRoot);
+            File.WriteAllText(Path.Combine(currentRoot, "sessions", "current.session"), "current");
+            File.WriteAllText(Path.Combine(previousRoot, "sessions", "previous.session"), "previous");
+            File.WriteAllText(Path.Combine(sessionsRoot, "existing.session"), "existing");
+
+            var configuration = CreateConfiguration(root);
+            var paths = PersistentStorageBootstrapper.Initialize(
+                configuration,
+                new TestEnvironment(currentRoot));
+
+            Assert.Equal("existing", File.ReadAllText(Path.Combine(paths.SessionsPath, "existing.session")));
+            Assert.Equal("current", File.ReadAllText(Path.Combine(paths.SessionsPath, "current.session")));
+            Assert.Equal("previous", File.ReadAllText(Path.Combine(paths.SessionsPath, "previous.session")));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
     }
 
     private static ConfigurationManager CreateConfiguration(string persistentRoot)
@@ -393,98 +354,59 @@ public sealed class PersistentStorageBootstrapperTests
         {
             ["Storage:RootPath"] = persistentRoot,
             ["ConnectionStrings:DefaultConnection"] = "Data Source=telegram_panel.db",
-            ["AdminAuth:InitialUsername"] = "tgpanel",
-            ["AdminAuth:InitialPassword"] = "tgpanel123",
             ["AdminAuth:CredentialsPath"] = "admin_auth.json",
             ["Telegram:SessionsPath"] = "sessions"
         });
         return configuration;
     }
 
-    private static void CreateDatabase(string path, int accountCount)
+    private static void CreateSqliteDatabase(string path, string marker)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
+        using var connection = new SqliteConnection($"Data Source={path}");
         connection.Open();
-        using (var createCommand = connection.CreateCommand())
-        {
-            createCommand.CommandText = "CREATE TABLE \"Accounts\" (\"Id\" INTEGER NOT NULL PRIMARY KEY);";
-            createCommand.ExecuteNonQuery();
-        }
+        ExecuteNonQuery(connection, "CREATE TABLE RecoveryMarker (Value TEXT NOT NULL);");
 
-        for (var index = 1; index <= accountCount; index++)
-        {
-            using var insertCommand = connection.CreateCommand();
-            insertCommand.CommandText = "INSERT INTO \"Accounts\" (\"Id\") VALUES ($id);";
-            insertCommand.Parameters.AddWithValue("$id", index);
-            insertCommand.ExecuteNonQuery();
-        }
+        using var insert = connection.CreateCommand();
+        insert.CommandText = "INSERT INTO RecoveryMarker (Value) VALUES ($value);";
+        insert.Parameters.AddWithValue("$value", marker);
+        insert.ExecuteNonQuery();
     }
 
-    private static long ReadAccountCount(string path)
+    private static string ReadDatabaseMarker(string path)
     {
-        using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
+        using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly");
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM \"Accounts\";";
-        return Convert.ToInt64(command.ExecuteScalar());
+        command.CommandText = "SELECT Value FROM RecoveryMarker LIMIT 1;";
+        return Assert.IsType<string>(command.ExecuteScalar());
     }
 
-    private static void AddBusinessData(string path)
+    private static void ExecuteNonQuery(SqliteConnection connection, string sql)
     {
-        using var connection = new SqliteConnection($"Data Source={path};Pooling=False");
-        connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = """
-            CREATE TABLE "DataDictionaries" ("Id" INTEGER NOT NULL PRIMARY KEY, "Name" TEXT NOT NULL);
-            INSERT INTO "DataDictionaries" ("Id", "Name") VALUES (1, '已有字典');
-            """;
+        command.CommandText = sql;
         command.ExecuteNonQuery();
     }
 
-    private static long ReadRowCount(string path, string tableName)
+    private static string CreateCredentialJson(string username)
     {
-        using var connection = new SqliteConnection($"Data Source={path};Mode=ReadOnly;Pooling=False");
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = $"SELECT COUNT(*) FROM \"{tableName.Replace("\"", "\"\"")}\";";
-        return Convert.ToInt64(command.ExecuteScalar());
-    }
-
-    private static void WriteCredentials(
-        string path,
-        string username,
-        string password,
-        bool mustChangePassword)
-    {
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var salt = RandomNumberGenerator.GetBytes(16);
-        const int iterations = 1_000;
-        var hash = Rfc2898DeriveBytes.Pbkdf2(
-            Encoding.UTF8.GetBytes(password),
-            salt,
-            iterations,
-            HashAlgorithmName.SHA256,
-            32);
-        var now = DateTime.UtcNow;
-        var json = JsonSerializer.Serialize(new
+        return System.Text.Json.JsonSerializer.Serialize(new
         {
             Version = 1,
             Username = username,
-            SaltBase64 = Convert.ToBase64String(salt),
-            HashBase64 = Convert.ToBase64String(hash),
-            Iterations = iterations,
-            MustChangePassword = mustChangePassword,
-            CreatedAtUtc = now,
-            UpdatedAtUtc = now
+            SaltBase64 = Convert.ToBase64String(Enumerable.Range(1, 16).Select(value => (byte)value).ToArray()),
+            HashBase64 = Convert.ToBase64String(Enumerable.Range(1, 32).Select(value => (byte)value).ToArray()),
+            Iterations = 150_000,
+            MustChangePassword = false,
+            CreatedAtUtc = DateTime.UnixEpoch,
+            UpdatedAtUtc = DateTime.UnixEpoch
         });
-        File.WriteAllText(path, json);
     }
 
     private static string ReadCredentialUsername(string path)
     {
-        using var document = JsonDocument.Parse(File.ReadAllText(path));
-        return document.RootElement.GetProperty("Username").GetString()!;
+        using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+        return document.RootElement.GetProperty("Username").GetString() ?? string.Empty;
     }
 
     private static string CreateTempDirectory()

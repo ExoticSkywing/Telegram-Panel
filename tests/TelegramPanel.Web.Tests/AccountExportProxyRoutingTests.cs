@@ -104,6 +104,19 @@ public sealed class AccountExportProxyRoutingTests
     }
 
     [Fact]
+    public async Task 全局模式缺少配置时独立导出会闭锁而不是直连()
+    {
+        var resolver = new StubProxyResolver(new AccountProxyResolution(null, true));
+        var service = CreateService(resolver);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ResolveIndependentExportProxyAsync(46));
+
+        Assert.Contains("阻止降级为直连", error.Message);
+        Assert.Equal(46, resolver.LastAccountId);
+    }
+
+    [Fact]
     public async Task 停用代理解析失败时不会回退全局代理()
     {
         var resolver = new StubProxyResolver(

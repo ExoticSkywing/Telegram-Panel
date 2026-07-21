@@ -19,6 +19,7 @@ namespace TelegramPanel.Core.Services.Telegram;
 public class AccountImportService
 {
     public const int MaxPerAccountWarpBatchSize = 10;
+    public const string ManagedWarpRequestPrefix = "telegram-panel.internal.import.";
     private const int MaxZipEntryCount = 5_000;
     private const long MaxZipEntryBytes = 100L * 1024 * 1024;
     private const long MaxZipExtractedBytes = 1024L * 1024 * 1024;
@@ -29,6 +30,13 @@ public class AccountImportService
     private readonly ILogger<AccountImportService> _logger;
     private readonly IConfiguration _configuration;
     private readonly ProxyManagementService _proxyManagement;
+    private readonly TemporaryWarpClaimStore _temporaryWarpClaims;
+
+    public static bool IsManagedWarpRequestId(string? requestId) =>
+        !string.IsNullOrWhiteSpace(requestId)
+        && requestId.Trim().StartsWith(
+            ManagedWarpRequestPrefix,
+            StringComparison.OrdinalIgnoreCase);
 
     public AccountImportService(
         ISessionImporter sessionImporter,
@@ -36,7 +44,8 @@ public class AccountImportService
         AccountManagementService accountManagement,
         ILogger<AccountImportService> logger,
         IConfiguration configuration,
-        ProxyManagementService proxyManagement)
+        ProxyManagementService proxyManagement,
+        TemporaryWarpClaimStore temporaryWarpClaims)
     {
         _sessionImporter = sessionImporter;
         _db = db;
@@ -44,6 +53,7 @@ public class AccountImportService
         _logger = logger;
         _configuration = configuration;
         _proxyManagement = proxyManagement;
+        _temporaryWarpClaims = temporaryWarpClaims;
     }
 
     /// <summary>
@@ -552,7 +562,8 @@ public class AccountImportService
                     existing.SessionPath = targetSessionPath;
                     existing.ApiId = apiId;
                     existing.ApiHash = apiHash.Trim();
-                    existing.IsActive = true;
+                    // 代理绑定完成前保持停用，避免后台任务在短暂窗口使用旧路由。
+                    existing.IsActive = false;
                     existing.LastSyncAt = DateTime.UtcNow;
                     // 仅在提供了二级密码时更新，避免覆盖已有密码
                     if (!string.IsNullOrWhiteSpace(effectiveTwoFactorPassword))
@@ -570,7 +581,7 @@ public class AccountImportService
                         SessionPath = targetSessionPath,
                         ApiId = apiId,
                         ApiHash = apiHash.Trim(),
-                        IsActive = true,
+                        IsActive = false,
                         CategoryId = categoryId,
                         TwoFactorPassword = string.IsNullOrWhiteSpace(effectiveTwoFactorPassword) ? null : effectiveTwoFactorPassword.Trim(),
                         CreatedAt = DateTime.UtcNow,
@@ -751,11 +762,23 @@ public class AccountImportService
         CancellationToken cancellationToken,
         Func<ImportResult, Task<ImportResult>>? persist = null)
     {
-        var selectedBinding = binding ?? new AccountProxyBindingInput("global");
+        if (binding == null)
+        {
+            return new ImportResult(
+                false,
+                null,
+                null,
+                null,
+                null,
+                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连");
+        }
+
+        var selectedBinding = binding;
         var operationNonce = Guid.NewGuid().ToString("N");
         PreparedImportProxy prepared = default;
         var keepTemporaryWarp = false;
         ImportResult? result = null;
+        int? stagedAccountId = null;
 
         try
         {
@@ -777,31 +800,48 @@ public class AccountImportService
             }
 
             var phone = PhoneNumberFormatter.NormalizeToDigits(result.Phone);
-            if (importedPhones?.Contains(phone) == true)
+            if (importedPhones != null
+                && !string.IsNullOrWhiteSpace(phone)
+                && importedPhones.Contains(phone))
             {
-                try
+                if (string.Equals(
+                        selectedBinding.Strategy,
+                        "direct",
+                        StringComparison.OrdinalIgnoreCase))
                 {
-                    result.PendingSessionReplacement?.Dispose();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogCritical(ex, "Failed to roll back duplicate imported Session for {Phone}", phone);
+                    try
+                    {
+                        result.PendingSessionReplacement?.Dispose();
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogCritical(
+                            ex,
+                            "Failed to roll back duplicate direct-import Session for {Phone}",
+                            phone);
+                        return new ImportResult(
+                            false,
+                            phone,
+                            result.UserId,
+                            result.Username,
+                            result.SessionPath,
+                            $"检测到重复账号，但 Session 自动回滚失败：{FormatException(ex)}");
+                    }
+
                     return new ImportResult(
                         false,
                         phone,
                         result.UserId,
                         result.Username,
-                        result.SessionPath,
-                        $"检测到重复账号，但 Session 自动回滚失败：{FormatException(ex)}");
+                        null,
+                        "重复账号已跳过");
                 }
 
-                return new ImportResult(
-                    false,
-                    phone,
-                    result.UserId,
-                    result.Username,
-                    null,
-                    "重复账号已跳过");
+                // 每个条目都必须把本次实际验证过的出口绑定到最终账号。
+                // 若首条绑定失败，后续重复账号仍可重试；Resin 也需继承最新临时 Lease。
+                _logger.LogInformation(
+                    "Duplicate account {Phone} will be rebound to the route used by the latest validated session",
+                    phone);
             }
 
             if (persist != null)
@@ -814,7 +854,6 @@ public class AccountImportService
 
             if (importedPhones != null && !string.IsNullOrWhiteSpace(phone))
                 importedPhones.Add(phone);
-
             if (string.IsNullOrWhiteSpace(phone))
             {
                 result.PendingSessionReplacement?.Dispose();
@@ -836,6 +875,14 @@ public class AccountImportService
                 };
             }
 
+            stagedAccountId = account.Id;
+            // 已有账号可能仍有按旧路由创建的客户端；在绑定前先严格释放。
+            await _proxyManagement.ReleaseAccountClientStrictAsync(account.Id);
+            await ValidatePreparedImportRouteAsync(
+                selectedBinding,
+                prepared,
+                cancellationToken);
+
             var effectiveBinding = prepared.TemporaryWarpProxyId is int warpProxyId && warpProxyId > 0
                 ? new AccountProxyBindingInput("existing", warpProxyId)
                 : selectedBinding;
@@ -849,12 +896,41 @@ public class AccountImportService
                 return result with
                 {
                     Phone = phone,
-                    Error = $"账号已导入，但代理设置失败：{item?.Error ?? item?.Summary ?? "未知原因"}"
+                    Error = $"账号已导入，但代理设置失败，账号已保持停用：{item?.Error ?? item?.Summary ?? "未知原因"}"
                 };
             }
 
+            if (prepared.TemporaryResinLease != null
+                && prepared.Connection != null
+                && !string.IsNullOrWhiteSpace(prepared.TemporaryResinLeaseKey))
+            {
+                // 每次导入都必须把本次验证出口继承给稳定身份，不能沿用未经本次验证的旧 Lease。
+                var inherited = await _proxyManagement.InheritImportResinLeaseBestEffortAsync(
+                    prepared.Connection,
+                    prepared.TemporaryResinLease.Platform,
+                    prepared.TemporaryResinLeaseKey,
+                    $"tg_account_{account.Id}",
+                    cancellationToken);
+                if (!inherited)
+                {
+                    // 临时身份与稳定身份之间无法确认沿用同一出口时，禁止启用账号。
+                    // 否则后台任务的首次正式连接可能暴露不同 IP，破坏首连出口冻结语义。
+                    await KeepImportedAccountInactiveBestEffortAsync(account.Id);
+                    return result with
+                    {
+                        Phone = phone,
+                        Error = "账号已导入，但 Resin Lease 继承失败，无法保证正式连接沿用验证出口，账号已保持停用"
+                    };
+                }
+            }
+
             keepTemporaryWarp = prepared.TemporaryWarpProxyId.HasValue;
-            return result with { Phone = phone };
+            await _accountManagement.SetAccountActiveStatusAsync(account.Id, true);
+            importedPhones?.Add(phone);
+            return result with
+            {
+                Phone = phone
+            };
         }
         catch (OperationCanceledException)
         {
@@ -881,9 +957,10 @@ public class AccountImportService
             {
                 if (!hadPendingSession)
                 {
+                    await KeepImportedAccountInactiveBestEffortAsync(stagedAccountId);
                     return result with
                     {
-                        Error = $"账号已导入，但代理设置失败：{FormatException(ex)}"
+                        Error = $"账号已导入，但代理设置失败，账号已保持停用：{FormatException(ex)}"
                     };
                 }
 
@@ -909,13 +986,15 @@ public class AccountImportService
         {
             if (prepared.TemporaryWarpProxyId is int proxyId && proxyId > 0 && !keepTemporaryWarp)
                 await DeleteTemporaryWarpBestEffortAsync(proxyId);
-            if (prepared.Connection != null && !string.IsNullOrWhiteSpace(prepared.TemporaryResinLeaseKey))
+            if (prepared.TemporaryResinLease != null
+                && !string.IsNullOrWhiteSpace(prepared.TemporaryResinLeaseKey))
             {
                 await _proxyManagement.ReleaseImportResinLeaseBestEffortAsync(
-                    prepared.Connection.ProxyId,
+                    prepared.TemporaryResinLease,
                     prepared.TemporaryResinLeaseKey,
                     CancellationToken.None);
             }
+            prepared.TemporaryWarpClaim?.Dispose();
         }
     }
 
@@ -926,16 +1005,22 @@ public class AccountImportService
         CancellationToken cancellationToken)
     {
         if (binding == null)
-            return default;
+            throw new ArgumentException("请先明确选择账号首次连接出口");
 
         var strategy = (binding.Strategy ?? string.Empty).Trim().ToLowerInvariant();
         if (strategy == "direct")
             return default;
         if (strategy == "global")
+        {
+            var globalProxy = GlobalTelegramProxyConfiguration.BuildRequired(_configuration);
             return new PreparedImportProxy(
-                GlobalTelegramProxyConfiguration.Build(_configuration),
+                globalProxy,
+                null,
+                null,
+                null,
                 null,
                 null);
+        }
 
         if (strategy == "existing")
         {
@@ -949,10 +1034,20 @@ public class AccountImportService
                 throw new KeyNotFoundException("所选代理不存在或已停用");
 
             var stableImportKey = BuildImportStableKey(stableKeySeed, operationNonce);
+            var resinLease = proxy.Kind == OutboundProxyKinds.Resin
+                ? new ResinLeaseControlSnapshot(
+                    proxy.Id,
+                    proxy.ResinAdminUrl,
+                    proxy.ResinAdminToken,
+                    proxy.ResinPlatform)
+                : null;
             return new PreparedImportProxy(
                 AccountProxyResolver.BuildConnectionOptions(proxy, stableImportKey),
                 null,
-                proxy.Kind == OutboundProxyKinds.Resin ? stableImportKey : null);
+                resinLease,
+                resinLease != null ? stableImportKey : null,
+                stableImportKey,
+                null);
         }
 
         if (strategy != "warp_per_account")
@@ -964,22 +1059,36 @@ public class AccountImportService
         if (displaySeed.Length > 80)
             displaySeed = displaySeed[..80];
 
-        var warpProxy = await _proxyManagement.CreateWarpAsync(
-            $"WARP · 导入 {displaySeed}",
-            $"import-{Guid.NewGuid():N}",
-            cancellationToken);
+        var requestId = $"{ManagedWarpRequestPrefix}{Guid.NewGuid():N}";
+        var warpClaim = _temporaryWarpClaims.ClaimRequest(requestId);
         try
         {
-            return new PreparedImportProxy(
-                AccountProxyResolver.BuildConnectionOptions(
-                    warpProxy,
-                    BuildImportStableKey(stableKeySeed, operationNonce)),
-                warpProxy.Id,
-                null);
+            var warpProxy = await _proxyManagement.CreateWarpAsync(
+                $"WARP · 导入 {displaySeed}",
+                requestId,
+                cancellationToken);
+            try
+            {
+                var stableImportKey = BuildImportStableKey(stableKeySeed, operationNonce);
+                return new PreparedImportProxy(
+                    AccountProxyResolver.BuildConnectionOptions(
+                        warpProxy,
+                        stableImportKey),
+                    warpProxy.Id,
+                    null,
+                    null,
+                    stableImportKey,
+                    warpClaim);
+            }
+            catch
+            {
+                await DeleteTemporaryWarpBestEffortAsync(warpProxy.Id);
+                throw;
+            }
         }
         catch
         {
-            await DeleteTemporaryWarpBestEffortAsync(warpProxy.Id);
+            warpClaim.Dispose();
             throw;
         }
     }
@@ -1037,6 +1146,64 @@ public class AccountImportService
                 cancellationToken);
     }
 
+    private async Task ValidatePreparedImportRouteAsync(
+        AccountProxyBindingInput binding,
+        PreparedImportProxy prepared,
+        CancellationToken cancellationToken)
+    {
+        var strategy = (binding.Strategy ?? string.Empty).Trim().ToLowerInvariant();
+        ProxyConnectionOptions? current;
+        if (strategy == "global")
+        {
+            current = GlobalTelegramProxyConfiguration.Build(_configuration);
+        }
+        else if (strategy is "existing" or "warp_per_account")
+        {
+            var proxyId = strategy == "existing"
+                ? binding.ProxyId
+                : prepared.TemporaryWarpProxyId;
+            if (proxyId is not > 0 || string.IsNullOrWhiteSpace(prepared.StableIdentityKey))
+                throw new InvalidOperationException("导入期间冻结的代理快照不完整");
+
+            var proxy = await _proxyManagement.GetAsync(
+                proxyId.Value,
+                cancellationToken: cancellationToken);
+            if (proxy is not { IsEnabled: true })
+                throw new KeyNotFoundException("导入期间所选代理已被删除或停用");
+
+            current = AccountProxyResolver.BuildConnectionOptions(
+                proxy,
+                prepared.StableIdentityKey);
+        }
+        else
+        {
+            current = null;
+        }
+
+        if (!SameConnection(prepared.Connection, current))
+        {
+            throw new InvalidOperationException(
+                "导入期间代理连接参数已变化，已阻止切换出口并保持账号停用，请重新导入");
+        }
+    }
+
+    private static bool SameConnection(
+        ProxyConnectionOptions? expected,
+        ProxyConnectionOptions? current)
+    {
+        if (expected == null || current == null)
+            return expected == null && current == null;
+
+        return expected.ProxyId == current.ProxyId
+               && string.Equals(expected.Kind, current.Kind, StringComparison.Ordinal)
+               && string.Equals(expected.Protocol, current.Protocol, StringComparison.Ordinal)
+               && string.Equals(expected.Host, current.Host, StringComparison.OrdinalIgnoreCase)
+               && expected.Port == current.Port
+               && string.Equals(expected.Username, current.Username, StringComparison.Ordinal)
+               && string.Equals(expected.Password, current.Password, StringComparison.Ordinal)
+               && string.Equals(expected.Secret, current.Secret, StringComparison.Ordinal);
+    }
+
     private async Task DeleteTemporaryWarpBestEffortAsync(int proxyId)
     {
         try
@@ -1079,7 +1246,28 @@ public class AccountImportService
     private readonly record struct PreparedImportProxy(
         ProxyConnectionOptions? Connection,
         int? TemporaryWarpProxyId,
-        string? TemporaryResinLeaseKey);
+        ResinLeaseControlSnapshot? TemporaryResinLease,
+        string? TemporaryResinLeaseKey,
+        string? StableIdentityKey,
+        IDisposable? TemporaryWarpClaim);
+
+    private async Task KeepImportedAccountInactiveBestEffortAsync(int? accountId)
+    {
+        if (accountId is not > 0)
+            return;
+
+        try
+        {
+            await _accountManagement.SetAccountActiveStatusAsync(accountId.Value, false);
+            // 即使账号已经停用，也必须确认旧客户端真正断开；普通释放会吞掉
+            // DisposeAsync 失败并丢失引用，无法证明旧出口已经停止。
+            await _proxyManagement.ReleaseAccountClientStrictAsync(accountId.Value);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to keep partially imported account {AccountId} inactive", accountId);
+        }
+    }
 
     private async Task<ImportResult> PersistImportedSessionAsync(
         ImportResult result,
@@ -1131,7 +1319,8 @@ public class AccountImportService
                 existing.SessionPath = result.SessionPath!;
                 existing.ApiId = apiId;
                 existing.ApiHash = apiHash.Trim();
-                existing.IsActive = true;
+                // 路由绑定完成前禁止后台任务选择该账号。
+                existing.IsActive = false;
                 existing.CategoryId = categoryId ?? existing.CategoryId;
                 existing.LastSyncAt = DateTime.UtcNow;
                 if (!string.IsNullOrWhiteSpace(twoFactorPassword))
@@ -1148,7 +1337,7 @@ public class AccountImportService
                     SessionPath = result.SessionPath!,
                     ApiId = apiId,
                     ApiHash = apiHash.Trim(),
-                    IsActive = true,
+                    IsActive = false,
                     CategoryId = categoryId,
                     TwoFactorPassword = string.IsNullOrWhiteSpace(twoFactorPassword) ? null : twoFactorPassword.Trim(),
                     CreatedAt = DateTime.UtcNow,

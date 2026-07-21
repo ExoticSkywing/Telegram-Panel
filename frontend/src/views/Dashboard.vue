@@ -33,10 +33,10 @@
           </template>
           <div class="status-list">
             <div class="status-row egress-status-row">
-              <span :class="['status-dot', egress?.success ? 'ok' : 'danger']" />
+              <span :class="['status-dot', egress?.success ? 'ok' : (egress || egressError) ? 'danger' : 'warning']" />
               <div class="egress-status-content">
                 <div>
-                  面板公网出口：<strong>{{ egress?.success ? egress.ip || '未知' : egress ? '检测失败' : '检测中' }}</strong>
+                  面板公网出口：<strong>{{ egress?.success ? egress.ip || '未知' : (egress || egressError) ? '检测失败' : '检测中' }}</strong>
                   <el-tag v-if="egress?.warpStatus" size="small" :type="egress.warpStatus === 'on' || egress.warpStatus === 'plus' ? 'success' : 'info'">
                     WARP {{ egress.warpStatus }}
                   </el-tag>
@@ -116,6 +116,7 @@ const syncing = ref(false)
 const summary = ref<DashboardSummary | null>(null)
 const egress = ref<NetworkEgress | null>(null)
 const egressLoading = ref(false)
+const egressError = ref('')
 let timer: number | undefined
 let loadPromise: Promise<void> | null = null
 
@@ -135,6 +136,7 @@ const needsAutoRefresh = computed(() =>
   || (summary.value?.enabledScheduledTaskCount || 0) > 0,
 )
 const egressDescription = computed(() => {
+  if (egressError.value) return egressError.value
   if (!egress.value) return '正在检测出口信息'
   if (!egress.value.success) return egress.value.error || '无法获取出口信息'
   const location = [egress.value.country, egress.value.city, egress.value.isp].filter(Boolean).join(' / ')
@@ -176,8 +178,12 @@ async function syncAll() {
 
 async function loadEgress() {
   egressLoading.value = true
+  egressError.value = ''
   try {
     egress.value = await panelApi.networkEgress()
+  } catch (error) {
+    egress.value = null
+    egressError.value = error instanceof Error ? error.message : '无法检测面板公网出口'
   } finally {
     egressLoading.value = false
   }

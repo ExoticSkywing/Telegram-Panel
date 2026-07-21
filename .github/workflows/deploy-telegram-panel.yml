@@ -61,7 +61,14 @@ jobs:
             fi
 
             docker pull "$IMAGE"
-            docker compose up -d --force-recreate telegram-panel
+            if [ -f docker-compose.warp.yml ]; then
+              docker compose \
+                -f docker-compose.yml \
+                -f docker-compose.warp.yml \
+                up -d --force-recreate telegram-panel
+            else
+              docker compose up -d --force-recreate telegram-panel
+            fi
 
             sleep 5
             docker ps --filter name=telegram-panel --format 'container={{.Names}} image={{.Image}} status={{.Status}}'

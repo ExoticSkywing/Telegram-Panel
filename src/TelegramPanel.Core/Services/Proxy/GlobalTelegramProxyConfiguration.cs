@@ -8,6 +8,15 @@ namespace TelegramPanel.Core.Services.Proxy;
 /// </summary>
 public static class GlobalTelegramProxyConfiguration
 {
+    /// <summary>
+    /// 解析必须存在的 Telegram 全局代理。选择全局代理属于明确的出站路由，
+    /// 配置缺失时绝不能静默降级为面板直连。
+    /// </summary>
+    public static ProxyConnectionOptions BuildRequired(IConfiguration configuration) =>
+        Build(configuration)
+        ?? throw new InvalidOperationException(
+            "Telegram 全局代理尚未配置，已阻止降级为直连");
+
     public static ProxyConnectionOptions? Build(IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);

@@ -72,6 +72,24 @@ public sealed class WarpLifecycleRegressionTests
     }
 
     [Fact]
+    public async Task 待清理WARP记录会继续占用主机端口()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        db.WarpProfiles.Add(Profile("cleanup-pending-profile", "cleanup_pending", 42080));
+        await db.SaveChangesAsync();
+
+        db.WarpProfiles.Add(Profile("new-profile", "creating", 42080));
+        await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+    }
+
+    [Fact]
     public async Task WARP显示名超长时在创建资源前拒绝()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -245,6 +263,77 @@ public sealed class WarpLifecycleRegressionTests
     }
 
     [Fact]
+    public async Task 容器删除成功但卷删除失败会保留禁用WARP供重试清理()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = new OutboundProxy
+        {
+            Name = "partial-delete",
+            Kind = "warp",
+            Protocol = "http",
+            Host = "partial-delete",
+            Port = 1080,
+            IsEnabled = true,
+            TestStatus = "ok"
+        };
+        var profile = new WarpProfile
+        {
+            ProfileId = "partial-delete-profile",
+            RequestId = "partial-delete-request",
+            ContainerName = "partial-delete-container",
+            ContainerId = "partial-delete-container-id",
+            VolumeName = "partial-delete-volume",
+            HostPort = 42202,
+            Status = "active",
+            DesiredEnabled = true,
+            Proxy = proxy
+        };
+        db.WarpProfiles.Add(profile);
+        await db.SaveChangesAsync();
+
+        var docker = new FakeWarpDockerClient
+        {
+            RemoveVolumeError = new InvalidOperationException("volume remove failed")
+        };
+        docker.SeedResources(
+            profile.ProfileId,
+            profile.ContainerName,
+            profile.VolumeName,
+            profile.ContainerId);
+        var service = CreateProxyService(db, CreateManager(db, docker, enabled: true));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.DeleteAsync(proxy.Id));
+
+        Assert.Contains("WARP 资源清理失败", error.Message);
+        Assert.Empty(docker.Containers);
+        Assert.Single(docker.Volumes);
+        var retainedProxy = await db.OutboundProxies.AsNoTracking().SingleAsync();
+        Assert.False(retainedProxy.IsEnabled);
+        Assert.Equal("fail", retainedProxy.TestStatus);
+        var retainedProfile = await db.WarpProfiles.AsNoTracking().SingleAsync();
+        Assert.Equal("deleting", retainedProfile.Status);
+        Assert.False(retainedProfile.DesiredEnabled);
+
+        docker.RemoveVolumeError = null;
+        await service.DeleteAsync(proxy.Id);
+
+        Assert.Empty(await db.OutboundProxies.AsNoTracking().ToListAsync());
+        Assert.Empty(docker.Containers);
+        Assert.Empty(docker.Volumes);
+        var deletedProfile = await db.WarpProfiles.AsNoTracking().SingleAsync();
+        Assert.Equal("deleted", deletedProfile.Status);
+        Assert.Null(deletedProfile.OutboundProxyId);
+    }
+
+    [Fact]
     public async Task 同请求历史失败Profile会先严格清理且失败时保留请求键()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -296,7 +385,7 @@ public sealed class WarpLifecycleRegressionTests
         Assert.Equal(0, docker.CreateVolumeCalls);
     }
 
-    private static WarpContainerManager CreateManager(
+    internal static WarpContainerManager CreateManager(
         AppDbContext db,
         FakeWarpDockerClient docker,
         bool enabled)
@@ -350,18 +439,21 @@ public sealed class WarpLifecycleRegressionTests
         public WarpContainerManager.IWarpDockerClient Create(string socketPath) => _client;
     }
 
-    private sealed class FakeWarpDockerClient : WarpContainerManager.IWarpDockerClient
+    internal sealed class FakeWarpDockerClient : WarpContainerManager.IWarpDockerClient
     {
         private readonly List<ContainerResource> _containers = new();
         private readonly Dictionary<string, string> _volumes = new(StringComparer.Ordinal);
         private int _nextContainerId;
 
         public Exception? StartError { get; set; }
+        public Exception? StopError { get; set; }
         public Exception? RemoveContainerError { get; set; }
         public Exception? RemoveVolumeError { get; set; }
         public int CreateVolumeCalls { get; private set; }
         public IReadOnlyCollection<string> Containers => _containers.Select(x => x.Id).ToArray();
         public IReadOnlyCollection<string> Volumes => _volumes.Keys.ToArray();
+        public List<string> StartedContainerReferences { get; } = new();
+        public List<string> StoppedContainerReferences { get; } = new();
         public List<string> RemovedContainerReferences { get; } = new();
 
         public void SeedResources(
@@ -421,6 +513,18 @@ public sealed class WarpLifecycleRegressionTests
             cancellationToken.ThrowIfCancellationRequested();
             if (StartError != null)
                 throw StartError;
+            StartedContainerReferences.Add(containerId);
+            return Task.CompletedTask;
+        }
+
+        public Task StopContainerAsync(
+            string containerId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (StopError != null)
+                throw StopError;
+            StoppedContainerReferences.Add(containerId);
             return Task.CompletedTask;
         }
 

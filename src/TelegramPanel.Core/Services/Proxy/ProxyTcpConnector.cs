@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -19,7 +20,8 @@ public static class ProxyTcpConnector
         ProxyConnectionOptions proxy,
         CancellationToken cancellationToken = default)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(targetHost);
+        ArgumentNullException.ThrowIfNull(proxy);
+        targetHost = NormalizeTargetHost(targetHost);
         if (targetPort is < 1 or > 65535)
             throw new ArgumentOutOfRangeException(nameof(targetPort));
 
@@ -232,4 +234,41 @@ public static class ProxyTcpConnector
         host.Contains(':') && !host.StartsWith("[", StringComparison.Ordinal)
             ? $"[{host}]:{port}"
             : $"{host}:{port}";
+
+    private static string NormalizeTargetHost(string targetHost)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetHost);
+        var host = targetHost;
+
+        if (host.StartsWith("[", StringComparison.Ordinal)
+            || host.EndsWith("]", StringComparison.Ordinal))
+        {
+            if (!(host.StartsWith("[", StringComparison.Ordinal)
+                  && host.EndsWith("]", StringComparison.Ordinal)))
+            {
+                throw new ArgumentException("代理目标主机格式无效", nameof(targetHost));
+            }
+
+            host = host[1..^1];
+        }
+
+        if (IPAddress.TryParse(host, out var ipAddress))
+            return ipAddress.ToString();
+
+        try
+        {
+            host = new IdnMapping().GetAscii(host);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException("代理目标主机格式无效", nameof(targetHost), ex);
+        }
+
+        // 目标地址可能来自用户导入的 Session。严格按 DNS 主机名校验，避免把
+        // CR/LF、空白或 URI 分隔符写入 HTTP CONNECT 请求行与 Host 头。
+        if (host.Length > 253 || Uri.CheckHostName(host) != UriHostNameType.Dns)
+            throw new ArgumentException("代理目标主机格式无效", nameof(targetHost));
+
+        return host;
+    }
 }

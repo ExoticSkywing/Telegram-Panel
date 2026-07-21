@@ -1,4 +1,7 @@
 using System.Reflection;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.FileProviders;
 using TelegramPanel.Web.Services;
 using Xunit;
 
@@ -184,6 +187,234 @@ public sealed class AppSelfUpdateServiceTests
         }
     }
 
+    [Fact]
+    public void FindUnsafeStoragePaths_AllPersistentPathsOutsideRotation_ReturnsEmpty()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var fixture = CreateStorageSafetyFixture(root);
+
+            var result = FindUnsafeStoragePaths(fixture);
+
+            Assert.Empty(result);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("local-config", "本地配置")]
+    [InlineData("data-protection", "DataProtection 密钥")]
+    [InlineData("modules", "Modules")]
+    [InlineData("uploads", "Uploads")]
+    public void FindUnsafeStoragePaths_RejectsAdditionalPersistentPathUnderCurrent(
+        string pathKind,
+        string expectedName)
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var fixture = CreateStorageSafetyFixture(root);
+            switch (pathKind)
+            {
+                case "local-config":
+                    fixture.Configuration["LocalConfig:Path"] = Path.Combine(fixture.CurrentDir, "local.json");
+                    break;
+                case "data-protection":
+                    fixture.Configuration["DataProtection:KeysPath"] = Path.Combine(fixture.CurrentDir, "keys");
+                    break;
+                case "modules":
+                    fixture.Configuration["Modules:RootPath"] = Path.Combine(fixture.CurrentDir, "modules");
+                    break;
+                case "uploads":
+                    fixture.Configuration["Storage:RootPath"] = Path.Combine(fixture.CurrentDir, "storage");
+                    break;
+                default:
+                    throw new InvalidOperationException($"未知测试路径类型：{pathKind}");
+            }
+
+            var result = FindUnsafeStoragePaths(fixture);
+
+            Assert.Contains(result, item => item.StartsWith($"{expectedName}=", StringComparison.Ordinal));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void FindUnsafeStoragePaths_RejectsExternalLinkPointingIntoCurrent()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var fixture = CreateStorageSafetyFixture(root);
+            var target = Path.Combine(fixture.CurrentDir, "linked-config");
+            var link = Path.Combine(root, "persistent-link");
+            Directory.CreateDirectory(target);
+            Directory.CreateSymbolicLink(link, target);
+            fixture.Configuration["LocalConfig:Path"] = Path.Combine(link, "settings.json");
+
+            var result = FindUnsafeStoragePaths(fixture);
+
+            Assert.Contains(result, item =>
+                item.StartsWith("本地配置=", StringComparison.Ordinal)
+                && item.Contains("真实路径=", StringComparison.Ordinal));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void FindUnsafeStoragePaths_DanglingLinkFailsClosed()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var fixture = CreateStorageSafetyFixture(root);
+            var link = Path.Combine(root, "dangling-link");
+            Directory.CreateSymbolicLink(link, Path.Combine(root, "missing-target"));
+            fixture.Configuration["LocalConfig:Path"] = Path.Combine(link, "settings.json");
+
+            var result = FindUnsafeStoragePaths(fixture);
+
+            Assert.Contains(result, item =>
+                item.StartsWith("本地配置路径无法安全解析", StringComparison.Ordinal));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Theory]
+    [InlineData("../outside")]
+    [InlineData("nested/child")]
+    [InlineData(@"nested\child")]
+    [InlineData(".")]
+    [InlineData("..")]
+    public void ResolveUpdateDirectories_RejectsNonChildDirectoryName(string configuredName)
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var options = new SelfUpdateOptions
+            {
+                WorkDirectoryName = configuredName
+            };
+
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => AppSelfUpdateService.ResolveUpdateDirectories(root, options));
+
+            Assert.Contains(
+                nameof(SelfUpdateOptions.WorkDirectoryName),
+                exception.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void ResolveUpdateDirectories_RejectsAbsoluteChildDirectory()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var options = new SelfUpdateOptions
+            {
+                CurrentDirectoryName = Path.GetFullPath(
+                    Path.Combine(root, "..", $"outside-{Guid.NewGuid():N}"))
+            };
+
+            Assert.Throws<InvalidOperationException>(
+                () => AppSelfUpdateService.ResolveUpdateDirectories(root, options));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void ResolveUpdateDirectories_RejectsDuplicateDirectories()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var options = new SelfUpdateOptions
+            {
+                WorkDirectoryName = "same",
+                CurrentDirectoryName = "same"
+            };
+
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => AppSelfUpdateService.ResolveUpdateDirectories(root, options));
+
+            Assert.Contains("必须互不相同", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void ResolveUpdateDirectories_RejectsChildLinkPointingOutsideWorkRoot()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var workRoot = Path.Combine(root, "work");
+            var outside = Path.Combine(root, "outside");
+            Directory.CreateDirectory(workRoot);
+            Directory.CreateDirectory(outside);
+            Directory.CreateSymbolicLink(
+                Path.Combine(workRoot, "self-update"),
+                outside);
+
+            var exception = Assert.Throws<InvalidOperationException>(
+                () => AppSelfUpdateService.ResolveUpdateDirectories(
+                    workRoot,
+                    new SelfUpdateOptions()));
+
+            Assert.Contains("真实路径超出", exception.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void ResolveUpdateDirectories_DefaultsStayInsideWorkRoot()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var (workspace, current, backup) =
+                AppSelfUpdateService.ResolveUpdateDirectories(
+                    root,
+                    new SelfUpdateOptions());
+
+            Assert.Equal(Path.Combine(root, "self-update"), workspace);
+            Assert.Equal(Path.Combine(root, "app-current"), current);
+            Assert.Equal(Path.Combine(root, "app-previous"), backup);
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
     private static void InvokePromote(string stage, string current, string backup)
     {
         var method = typeof(AppSelfUpdateService).GetMethod(
@@ -191,6 +422,46 @@ public sealed class AppSelfUpdateServiceTests
             BindingFlags.NonPublic | BindingFlags.Static)
             ?? throw new InvalidOperationException("未找到自更新目录切换方法");
         method.Invoke(null, new object[] { stage, current, backup });
+    }
+
+    private static List<string> FindUnsafeStoragePaths(StorageSafetyFixture fixture) =>
+        AppSelfUpdateService.FindUnsafeStoragePaths(
+            fixture.Configuration,
+            fixture.Environment,
+            fixture.CurrentDir,
+            fixture.BackupDir,
+            fixture.WorkspaceDir);
+
+    private static StorageSafetyFixture CreateStorageSafetyFixture(string root)
+    {
+        var currentDir = Path.Combine(root, "app-current");
+        var persistentDir = Path.Combine(root, "persistent");
+        Directory.CreateDirectory(currentDir);
+        Directory.CreateDirectory(persistentDir);
+
+        var configuration = new ConfigurationManager();
+        configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Storage:RootPath"] = persistentDir,
+            ["ConnectionStrings:DefaultConnection"] = $"Data Source={Path.Combine(persistentDir, "telegram-panel.db")}",
+            ["AdminAuth:CredentialsPath"] = Path.Combine(persistentDir, "admin_auth.json"),
+            ["Telegram:SessionsPath"] = Path.Combine(persistentDir, "sessions"),
+            ["LocalConfig:Path"] = Path.Combine(persistentDir, "appsettings.local.json"),
+            ["DataProtection:KeysPath"] = Path.Combine(persistentDir, "keys"),
+            ["Modules:RootPath"] = Path.Combine(persistentDir, "modules")
+        });
+
+        var environment = new StubWebHostEnvironment(currentDir)
+        {
+            WebRootPath = Path.Combine(currentDir, "wwwroot")
+        };
+
+        return new StorageSafetyFixture(
+            configuration,
+            environment,
+            currentDir,
+            Path.Combine(root, "app-previous"),
+            Path.Combine(root, "self-update"));
     }
 
     private static string CreateVersionDirectory(string root, string name, string version)
@@ -222,5 +493,28 @@ public sealed class AppSelfUpdateServiceTests
         {
             // 测试清理失败不应掩盖断言结果。
         }
+    }
+
+    private sealed record StorageSafetyFixture(
+        ConfigurationManager Configuration,
+        StubWebHostEnvironment Environment,
+        string CurrentDir,
+        string BackupDir,
+        string WorkspaceDir);
+
+    private sealed class StubWebHostEnvironment : IWebHostEnvironment
+    {
+        public StubWebHostEnvironment(string contentRootPath)
+        {
+            ContentRootPath = contentRootPath;
+            ContentRootFileProvider = new PhysicalFileProvider(contentRootPath);
+        }
+
+        public string ApplicationName { get; set; } = "TelegramPanel.Web.Tests";
+        public string EnvironmentName { get; set; } = "Test";
+        public string WebRootPath { get; set; } = string.Empty;
+        public IFileProvider WebRootFileProvider { get; set; } = new NullFileProvider();
+        public string ContentRootPath { get; set; }
+        public IFileProvider ContentRootFileProvider { get; set; }
     }
 }

@@ -1,6 +1,8 @@
 using TelegramPanel.Core.Models;
 using TelegramPanel.Core.Services.Proxy;
+using TelegramPanel.Core.Services.Telegram;
 using TelegramPanel.Data.Entities;
+using TelegramPanel.Web.Services;
 
 namespace TelegramPanel.Web.Api;
 
@@ -151,6 +153,10 @@ public static class ProxyApiEndpoints
     {
         try
         {
+            if (AccountLoginProxyCoordinator.IsManagedWarpRequestId(request.RequestId)
+                || AccountImportService.IsManagedWarpRequestId(request.RequestId))
+                throw new ArgumentException("该 WARP 请求 ID 前缀为系统内部保留值");
+
             var proxy = await service.CreateWarpAsync(
                 request.Name,
                 request.RequestId,
@@ -174,7 +180,7 @@ public static class ProxyApiEndpoints
             var result = await service.BindAccountsAsync(
                 new[] { id },
                 new AccountProxyBindingInput(
-                    request.Strategy ?? "direct",
+                    request.Strategy ?? string.Empty,
                     request.ProxyId,
                     request.ExpectedProxyId),
                 cancellationToken);
@@ -196,7 +202,7 @@ public static class ProxyApiEndpoints
             var result = await service.BindAccountsAsync(
                 request.AccountIds ?? Array.Empty<int>(),
                 new AccountProxyBindingInput(
-                    request.Strategy ?? "direct",
+                    request.Strategy ?? string.Empty,
                     request.ProxyId),
                 cancellationToken);
             return Results.Ok(result);
@@ -237,7 +243,9 @@ public static class ProxyApiEndpoints
             request.ResinAdminUrl,
             request.ResinAdminToken,
             request.IsEnabled,
-            request.TestAfterSave);
+            request.TestAfterSave,
+            request.ClearPassword,
+            request.ClearResinAdminToken);
 
     public static ProxyDto ToDto(OutboundProxy proxy) =>
         new(
@@ -308,7 +316,9 @@ public sealed record ProxySaveRequestDto(
     string? ResinAdminUrl,
     string? ResinAdminToken,
     bool IsEnabled = true,
-    bool TestAfterSave = false);
+    bool TestAfterSave = false,
+    bool ClearPassword = false,
+    bool ClearResinAdminToken = false);
 
 public sealed record ProxyImportRequestDto(string? Text, bool TestAfterImport = false);
 public sealed record WarpCreateRequestDto(string? Name, string? RequestId);

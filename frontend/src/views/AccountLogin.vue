@@ -9,8 +9,59 @@
       </template>
 
       <div class="mode-row">
-        <el-segmented v-model="loginMode" :options="modeOptions" :disabled="logging" />
+        <el-segmented
+          v-model="loginMode"
+          :options="modeOptions"
+          :disabled="logging || hasActiveLoginSession"
+        />
       </div>
+
+      <section class="login-proxy-route" aria-label="手动登录首次连接出口">
+        <div class="login-proxy-heading">
+          <span class="material-icons">vpn_lock</span>
+          <div>
+            <div class="cell-main">首次 Telegram 连接出口</div>
+            <div class="cell-sub">发送验证码或生成二维码之前生效，登录期间不可切换</div>
+          </div>
+        </div>
+        <el-radio-group v-model="proxyStrategy" class="login-proxy-options" :disabled="proxyRouteLocked">
+          <el-radio-button value="existing">已有代理</el-radio-button>
+          <el-radio-button value="warp_per_account" :disabled="!warpAvailable">一键创建独立 WARP</el-radio-button>
+          <el-radio-button value="global">全局设置</el-radio-button>
+          <el-radio-button value="direct">直连（确认风险）</el-radio-button>
+        </el-radio-group>
+        <el-select
+          v-if="proxyStrategy === 'existing'"
+          v-model="proxyId"
+          class="login-proxy-select"
+          filterable
+          placeholder="选择首次登录使用的代理"
+          :disabled="proxyRouteLocked"
+        >
+          <el-option
+            v-for="proxy in proxies"
+            :key="proxy.id"
+            :value="proxy.id"
+            :label="`${proxy.name} · ${proxy.protocol.toUpperCase()} · ${proxy.egressIp || `${proxy.host}:${proxy.port}`}`"
+            :disabled="!proxy.isEnabled"
+          />
+        </el-select>
+        <div v-if="!proxyStrategy" class="login-proxy-notice warning">
+          必须先明确选择代理出口。推荐选择已有代理或为本账号一键创建独立 WARP。
+        </div>
+        <div v-else-if="proxyStrategy === 'direct'" class="login-proxy-notice danger">
+          已明确选择直连：Telegram 从发送验证码或生成二维码开始即可看到面板公网 IP。
+        </div>
+        <div v-else-if="proxyStrategy === 'global'" class="login-proxy-notice warning">
+          仅在已配置全局代理时可用；未配置会在首次连接前拒绝，请改选已有代理、WARP 或明确直连。
+        </div>
+        <div v-else-if="proxyStrategy === 'warp_per_account' && !warpAvailable" class="login-proxy-notice danger">
+          {{ warpStatus?.error || '当前环境无法创建 WARP，请检查 Docker WARP 配置。' }}
+        </div>
+        <div v-else-if="activeLoginId > 0" class="login-proxy-notice success">
+          当前登录会话的出口已锁定；验证码、二维码和二级密码验证都会继续使用同一路由。
+        </div>
+      </section>
 
       <template v-if="loginMode === 'qr'">
         <div class="qr-body">
@@ -237,7 +288,7 @@
             <el-button
               type="primary"
               :loading="logging"
-              :disabled="telegramApiChecked && !telegramApiConfigured"
+              :disabled="(telegramApiChecked && !telegramApiConfigured) || proxySelectionInvalid"
               @click="startQrLogin"
             >
               {{ qrLoginId > 0 ? '重新生成二维码' : '生成二维码' }}
@@ -250,7 +301,7 @@
               v-if="currentStep !== 'done'"
               type="primary"
               :loading="logging"
-              :disabled="currentStep === 'phone' && telegramApiChecked && !telegramApiConfigured"
+              :disabled="currentStep === 'phone' && ((telegramApiChecked && !telegramApiConfigured) || proxySelectionInvalid)"
               @click="next"
             >
               {{ primaryButtonText }}
@@ -268,7 +319,15 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
 import { panelApi } from '@/api/panel'
-import type { AccountDetail, AccountListItem, AccountLoginResponse, AccountQrLoginResponse } from '@/api/types'
+import type {
+  AccountDetail,
+  AccountListItem,
+  AccountLoginResponse,
+  AccountProxyStrategy,
+  AccountQrLoginResponse,
+  OutboundProxy,
+  WarpRuntimeStatus,
+} from '@/api/types'
 
 type LoginStep = 'phone' | 'code' | 'password' | 'done'
 type LoginMode = 'qr' | 'phone'
@@ -301,6 +360,10 @@ const phonePasswordLoading = ref(false)
 const phonePasswordSource = ref('')
 const savePhonePasswordToSystem = ref(false)
 const saveQrPasswordToSystem = ref(false)
+const proxies = ref<OutboundProxy[]>([])
+const warpStatus = ref<WarpRuntimeStatus | null>(null)
+const proxyStrategy = ref<AccountProxyStrategy | ''>('')
+const proxyId = ref<number | null>(null)
 let qrTimer: number | undefined
 
 const modeOptions = [
@@ -309,6 +372,18 @@ const modeOptions = [
 ]
 
 const activeLoginId = computed(() => (loginMode.value === 'qr' ? qrLoginId.value : loginId.value))
+const hasActiveLoginSession = computed(() => loginId.value > 0 || qrLoginId.value > 0)
+const warpAvailable = computed(() => Boolean(
+  warpStatus.value?.platformSupported
+  && warpStatus.value.enabled
+  && warpStatus.value.dockerAvailable,
+))
+const proxySelectionInvalid = computed(() =>
+  !proxyStrategy.value
+  || (proxyStrategy.value === 'existing' && !proxyId.value)
+  || (proxyStrategy.value === 'warp_per_account' && !warpAvailable.value),
+)
+const proxyRouteLocked = computed(() => logging.value || hasActiveLoginSession.value)
 
 const stepIndex = computed(() => {
   if (currentStep.value === 'phone') return 0
@@ -354,12 +429,44 @@ const phonePasswordAlertTitle = computed(() => {
   return '此账号启用了两步验证，请输入密码。'
 })
 
+function ensureProxySelected() {
+  if (!proxySelectionInvalid.value) return true
+  if (!proxyStrategy.value) {
+    ElMessage.warning('请先明确选择本次登录首次连接使用的代理方式')
+  } else {
+    ElMessage.warning(proxyStrategy.value === 'warp_per_account' ? '当前环境无法创建 WARP' : '请选择已有代理')
+  }
+  return false
+}
+
+function selectedProxyPayload(): { proxyStrategy: AccountProxyStrategy; proxyId: number | null } {
+  const strategy = proxyStrategy.value as AccountProxyStrategy
+  return {
+    proxyStrategy: strategy,
+    proxyId: strategy === 'existing' ? proxyId.value : null,
+  }
+}
+
+async function loadLoginProxyOptions() {
+  const [proxyResult, warpResult] = await Promise.allSettled([
+    panelApi.proxies(),
+    panelApi.warpStatus(),
+  ])
+  proxies.value = proxyResult.status === 'fulfilled' ? proxyResult.value : []
+  warpStatus.value = warpResult.status === 'fulfilled' ? warpResult.value : null
+  if (!warpAvailable.value && proxyStrategy.value === 'warp_per_account') {
+    proxyStrategy.value = ''
+    proxyId.value = null
+  }
+}
+
 async function next() {
   if (logging.value) return
   if (currentStep.value === 'phone' && telegramApiChecked.value && !telegramApiConfigured.value) {
     ElMessage.warning('请先配置全局 Telegram API')
     return
   }
+  if (currentStep.value === 'phone' && !ensureProxySelected()) return
 
   logging.value = true
   try {
@@ -368,7 +475,11 @@ async function next() {
         ElMessage.warning('请输入手机号（包含国家代码）')
         return
       }
-      const response = await panelApi.startAccountLogin({ phone: phone.value, loginId: loginId.value })
+      const response = await panelApi.startAccountLogin({
+        phone: phone.value,
+        loginId: loginId.value,
+        ...selectedProxyPayload(),
+      })
       await handleLoginResponse(response)
       return
     }
@@ -426,23 +537,26 @@ async function startQrLogin() {
     ElMessage.warning('请先配置全局 Telegram API')
     return
   }
+  if (!ensureProxySelected()) return
 
   logging.value = true
-  stopQrPolling()
-  if (qrLoginId.value > 0) {
-    await panelApi.cancelAccountQrLogin(qrLoginId.value).catch(() => undefined)
-  }
-  qrLoginId.value = 0
-  qrDataUrl.value = ''
-  qrPassword.value = ''
-  qrPasswordSource.value = ''
-  qrStoredAccountId.value = null
-  saveQrPasswordToSystem.value = false
-  qrStatus.value = 'pending'
-  qrMessage.value = '正在生成二维码'
-
   try {
-    const response = await panelApi.startAccountQrLogin()
+    stopQrPolling()
+    // 重新生成二维码必须携带原登录 ID，让服务端复用已经冻结的代理状态。
+    // 若先调用取消接口，独立 WARP/Resin 身份会被释放并重建，导致登录中途更换出口。
+    const existingLoginId = qrLoginId.value
+    qrDataUrl.value = ''
+    qrPassword.value = ''
+    qrPasswordSource.value = ''
+    qrStoredAccountId.value = null
+    saveQrPasswordToSystem.value = false
+    qrStatus.value = 'pending'
+    qrMessage.value = '正在生成二维码'
+
+    const response = await panelApi.startAccountQrLogin({
+      loginId: existingLoginId || undefined,
+      ...selectedProxyPayload(),
+    })
     await handleQrResponse(response)
     if (response.status === 'pending') startQrPolling()
   } finally {
@@ -663,62 +777,103 @@ async function handleLoginResponse(response: AccountLoginResponse, showMessage =
   ElMessage.error(response.message || '登录失败')
 }
 
-function previous() {
-  if (currentStep.value === 'code') currentStep.value = 'phone'
-  else if (currentStep.value === 'password') currentStep.value = 'code'
+async function previous() {
+  if (currentStep.value === 'password') {
+    currentStep.value = 'code'
+    return
+  }
+  if (currentStep.value !== 'code' || logging.value) return
+
+  // 返回手机号步骤等同于放弃当前授权会话。必须先释放冻结路由，
+  // 否则再次发送验证码会重新创建 WARP/Resin 身份，导致同一登录流程切换出口。
+  logging.value = true
+  try {
+    if (loginId.value > 0) {
+      await panelApi.resetAccountLogin(loginId.value)
+    }
+    loginId.value = 0
+    code.value = ''
+    password.value = ''
+    proxyStrategy.value = ''
+    proxyId.value = null
+    currentStep.value = 'phone'
+  } catch {
+    ElMessage.error('旧登录会话无法安全释放，已阻止返回手机号步骤，请重试或重置登录')
+  } finally {
+    logging.value = false
+  }
 }
 
 async function cleanupCurrentSession() {
   stopQrPolling()
   if (loginId.value > 0) {
-    await panelApi.resetAccountLogin(loginId.value).catch(() => undefined)
+    await panelApi.resetAccountLogin(loginId.value)
+    loginId.value = 0
   }
   if (qrLoginId.value > 0) {
-    await panelApi.cancelAccountQrLogin(qrLoginId.value).catch(() => undefined)
+    await panelApi.cancelAccountQrLogin(qrLoginId.value)
+    qrLoginId.value = 0
   }
-  loginId.value = 0
-  qrLoginId.value = 0
 }
 
 async function reset() {
-  await cleanupCurrentSession()
-
-  phone.value = ''
-  code.value = ''
-  password.value = ''
-  qrPassword.value = ''
-  qrPasswordSource.value = ''
-  qrStoredAccountId.value = null
-  phonePasswordSource.value = ''
-  phonePasswordLoading.value = false
-  savePhonePasswordToSystem.value = false
-  saveQrPasswordToSystem.value = false
-  qrDataUrl.value = ''
-  qrStatus.value = 'idle'
-  qrMessage.value = ''
-  qrExpiresAt.value = null
-  savedAccount.value = null
-  currentStep.value = 'phone'
+  if (logging.value) return
+  logging.value = true
+  try {
+    await cleanupCurrentSession()
+    proxyStrategy.value = ''
+    proxyId.value = null
+    phone.value = ''
+    code.value = ''
+    password.value = ''
+    qrPassword.value = ''
+    qrPasswordSource.value = ''
+    qrStoredAccountId.value = null
+    phonePasswordSource.value = ''
+    phonePasswordLoading.value = false
+    savePhonePasswordToSystem.value = false
+    saveQrPasswordToSystem.value = false
+    qrDataUrl.value = ''
+    qrStatus.value = 'idle'
+    qrMessage.value = ''
+    qrExpiresAt.value = null
+    savedAccount.value = null
+    currentStep.value = 'phone'
+  } catch {
+    return
+  } finally {
+    logging.value = false
+  }
 }
 
 watch(loginMode, async (_value, oldValue) => {
   if (!oldValue) return
-  await cleanupCurrentSession()
-  phone.value = ''
-  code.value = ''
-  password.value = ''
-  qrPassword.value = ''
-  qrPasswordSource.value = ''
-  qrStoredAccountId.value = null
-  phonePasswordSource.value = ''
-  phonePasswordLoading.value = false
-  savePhonePasswordToSystem.value = false
-  saveQrPasswordToSystem.value = false
-  qrDataUrl.value = ''
-  qrStatus.value = 'idle'
-  qrMessage.value = ''
-  qrExpiresAt.value = null
-  currentStep.value = 'phone'
+  logging.value = true
+  try {
+    await cleanupCurrentSession()
+    proxyStrategy.value = ''
+    proxyId.value = null
+    phone.value = ''
+    code.value = ''
+    password.value = ''
+    qrPassword.value = ''
+    qrPasswordSource.value = ''
+    qrStoredAccountId.value = null
+    phonePasswordSource.value = ''
+    phonePasswordLoading.value = false
+    savePhonePasswordToSystem.value = false
+    saveQrPasswordToSystem.value = false
+    qrDataUrl.value = ''
+    qrStatus.value = 'idle'
+    qrMessage.value = ''
+    qrExpiresAt.value = null
+    savedAccount.value = null
+    currentStep.value = 'phone'
+  } catch {
+    return
+  } finally {
+    logging.value = false
+  }
 })
 
 onBeforeUnmount(() => {
@@ -731,7 +886,12 @@ onBeforeUnmount(() => {
   }
 })
 
-onMounted(loadTelegramApiStatus)
+onMounted(async () => {
+  await Promise.allSettled([
+    loadTelegramApiStatus(),
+    loadLoginProxyOptions(),
+  ])
+})
 </script>
 
 <style scoped>
@@ -773,6 +933,55 @@ onMounted(loadTelegramApiStatus)
 
 .mode-row :deep(.el-segmented) {
   min-width: 260px;
+}
+
+.login-proxy-route {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 22px;
+  padding: 14px 16px;
+  border: 1px solid var(--tp-border);
+  border-left: 4px solid var(--el-color-primary);
+  border-radius: 4px;
+  background: var(--tp-panel);
+}
+
+.login-proxy-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.login-proxy-heading .material-icons {
+  flex: 0 0 auto;
+  color: var(--el-color-primary);
+  font-size: 26px;
+}
+
+.login-proxy-options {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.login-proxy-select {
+  width: 100%;
+}
+
+.login-proxy-notice {
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.login-proxy-notice.warning {
+  color: var(--el-color-warning-dark-2);
+}
+
+.login-proxy-notice.danger {
+  color: var(--el-color-danger);
+}
+
+.login-proxy-notice.success {
+  color: var(--el-color-success);
 }
 
 .steps {
@@ -866,6 +1075,24 @@ onMounted(loadTelegramApiStatus)
 }
 
 @media (max-width: 760px) {
+  .login-proxy-options {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .login-proxy-options :deep(.el-radio-button),
+  .login-proxy-options :deep(.el-radio-button__inner) {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .login-proxy-options :deep(.el-radio-button__inner) {
+    height: 100%;
+    padding: 8px 10px;
+    white-space: normal;
+  }
+
   .qr-layout {
     grid-template-columns: 1fr;
     justify-items: center;
@@ -874,6 +1101,12 @@ onMounted(loadTelegramApiStatus)
   .qr-side {
     justify-items: center;
     text-align: center;
+  }
+}
+
+@media (max-width: 420px) {
+  .login-proxy-options {
+    grid-template-columns: 1fr;
   }
 }
 </style>

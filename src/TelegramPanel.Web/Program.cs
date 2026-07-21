@@ -7,8 +7,10 @@ using System.Security.Claims;
 using Serilog;
 using TelegramPanel.Core;
 using TelegramPanel.Core.Interfaces;
+using TelegramPanel.Core.Models;
 using TelegramPanel.Core.Services;
 using TelegramPanel.Core.Services.Telegram;
+using TelegramPanel.Core.Services.Proxy;
 using TelegramPanel.Data;
 using TelegramPanel.Modules;
 using TelegramPanel.Web.Modules;
@@ -17,11 +19,15 @@ using TelegramPanel.Web.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.FileProviders;
 using System.Diagnostics;
+using System.Data.Common;
 
 // 诊断：对某个目录下的 *.json/*.session 做一次“可转换/可校验”检查（不写数据库）
-// 用法：dotnet run --project src/TelegramPanel.Web -- --diag-session-dir "D:/path/to/dir"
+// 用法：先通过 Telegram__Proxy__Server/Port 配置代理；若确需直连，额外传入 --allow-direct。
+// dotnet run --project src/TelegramPanel.Web -- --diag-session-dir "D:/path/to/dir"
 if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringComparison.OrdinalIgnoreCase))
 {
     var dir = args[1];
@@ -41,6 +47,29 @@ if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringCompa
         b.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Information);
     });
     var logger = loggerFactory.CreateLogger("SessionDiag");
+    var diagConfiguration = new ConfigurationBuilder()
+        .AddEnvironmentVariables()
+        .Build();
+    ProxyConnectionOptions? diagProxy;
+    try
+    {
+        diagProxy = GlobalTelegramProxyConfiguration.Build(diagConfiguration);
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"诊断代理配置无效：{ex.Message}");
+        return;
+    }
+
+    var allowDirect = args.Skip(2)
+        .Any(x => string.Equals(x, "--allow-direct", StringComparison.OrdinalIgnoreCase));
+    if (diagProxy == null && !allowDirect)
+    {
+        Console.Error.WriteLine(
+            "诊断可能连接 Telegram，已阻止默认直连。请配置 Telegram__Proxy__Server/Port，"
+            + "或明确追加 --allow-direct 承担公网 IP 暴露风险。");
+        return;
+    }
 
     var jsonFiles = Directory.EnumerateFiles(dir, "*.json", SearchOption.TopDirectoryOnly)
         .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
@@ -119,7 +148,8 @@ if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringCompa
                         targetSessionPath: targetSessionPath,
                         phone: phone,
                         userId: userId,
-                        logger: logger);
+                        logger: logger,
+                        proxy: diagProxy);
                 }
                 else
                 {
@@ -130,7 +160,8 @@ if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringCompa
                         targetSessionPath: targetSessionPath,
                         phone: phone,
                         userId: userId,
-                        logger: logger);
+                        logger: logger,
+                        proxy: diagProxy);
                 }
             }
             else
@@ -252,10 +283,19 @@ catch (FileNotFoundException ex)
 
 // 自更新会切换 ContentRootPath。数据库、后台凭据和 Session 必须在此之前统一到持久化目录，
 // 并尝试从旧的 /app、app-current、app-previous 目录恢复，避免升级后打开空库或重新生成默认凭据。
-var persistentStorage = PersistentStorageBootstrapper.Initialize(
-    builder.Configuration,
-    builder.Environment,
-    message => Console.WriteLine($"[Storage] {message}"));
+PersistentStoragePaths persistentStorage;
+try
+{
+    persistentStorage = PersistentStorageBootstrapper.Initialize(
+        builder.Configuration,
+        builder.Environment,
+        message => Console.WriteLine($"[Storage] {message}"));
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine($"Failed to initialize persistent storage paths: {ex.Message}");
+    throw;
+}
 
 // 配置 Serilog
 static int ReadRetainedFileCountLimit(IConfiguration configuration)
@@ -395,7 +435,7 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 });
 
 // 数据库上下文
-// 持久化路径初始化失败时必须中止启动，避免兜底到另一个空库并生成新的后台凭据。
+// 持久化初始化失败会在上方终止启动，禁止回退到可能创建空库的临时路径。
 var connectionString = persistentStorage.ConnectionString;
 
 // 云端场景（容器/卷/后台任务）更容易出现 SQLite 写锁：这里统一增强连接参数，提升抗锁能力
@@ -417,6 +457,9 @@ builder.Services.AddTelegramPanelData(connectionString);
 
 // Telegram Panel 核心服务
 builder.Services.AddTelegramPanelCore();
+builder.Services.AddSingleton<AccountLoginProxyStateStore>();
+builder.Services.AddScoped<AccountLoginProxyCoordinator>();
+builder.Services.AddHostedService<AccountLoginProxyCleanupService>();
 builder.Services.AddScoped<AccountExportService>();
 builder.Services.AddScoped<DataSyncService>();
 builder.Services.AddScoped<UiPreferencesService>();
@@ -554,8 +597,11 @@ using (var scope = app.Services.CreateScope())
             }
             else
             {
-                var baseline = migrations.First(); // EF 返回的顺序为从旧到新
-                EnsureMigrationsHistoryBaseline(conn, baseline);
+                var baselinedMigrations = LegacyDatabaseMigrationBaseline.Apply(conn, migrations);
+                Log.Warning(
+                    "Database has schema tables but no __EFMigrationsHistory; reconstructed history through {MigrationId} ({Count} migrations)",
+                    baselinedMigrations[^1],
+                    baselinedMigrations.Count);
                 db.Database.Migrate();
             }
         }
@@ -663,63 +709,6 @@ using (var scope = app.Services.CreateScope())
             }
         }
 
-        void EnsureMigrationsHistoryBaseline(System.Data.Common.DbConnection connection, string baselineMigrationId)
-        {
-            try
-            {
-                // 创建历史表（若不存在）
-                using (var cmd = connection.CreateCommand())
-                {
-                    cmd.CommandText = @"
-CREATE TABLE IF NOT EXISTS __EFMigrationsHistory (
-    MigrationId TEXT NOT NULL CONSTRAINT PK___EFMigrationsHistory PRIMARY KEY,
-    ProductVersion TEXT NOT NULL
-);";
-                    cmd.ExecuteNonQuery();
-                }
-
-                // 若 baseline 已存在则跳过
-                using (var check = connection.CreateCommand())
-                {
-                    check.CommandText = "SELECT COUNT(1) FROM __EFMigrationsHistory WHERE MigrationId = $id;";
-                    var p = check.CreateParameter();
-                    p.ParameterName = "$id";
-                    p.Value = baselineMigrationId;
-                    check.Parameters.Add(p);
-                    var exists = Convert.ToInt32(check.ExecuteScalar()) > 0;
-                    if (exists)
-                        return;
-                }
-
-                var productVersion = typeof(Microsoft.EntityFrameworkCore.DbContext)
-                    .Assembly
-                    .GetName()
-                    .Version?
-                    .ToString(3) ?? "8.0.0";
-
-                using (var insert = connection.CreateCommand())
-                {
-                    insert.CommandText = "INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion) VALUES ($id, $v);";
-                    var p1 = insert.CreateParameter();
-                    p1.ParameterName = "$id";
-                    p1.Value = baselineMigrationId;
-                    insert.Parameters.Add(p1);
-
-                    var p2 = insert.CreateParameter();
-                    p2.ParameterName = "$v";
-                    p2.Value = productVersion;
-                    insert.Parameters.Add(p2);
-
-                    insert.ExecuteNonQuery();
-                }
-
-                Log.Warning("Database has schema tables but no __EFMigrationsHistory; baselined migrations history with {MigrationId}", baselineMigrationId);
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "Failed to baseline __EFMigrationsHistory; database might not auto-upgrade");
-            }
-        }
     }
     catch (Exception ex)
     {
@@ -1358,5 +1347,240 @@ finally
     finally
     {
         Log.CloseAndFlush();
+    }
+}
+
+internal static class LegacyDatabaseMigrationBaseline
+{
+    internal static IReadOnlyList<string> Apply(
+        DbConnection connection,
+        IReadOnlyList<string> migrations)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        ArgumentNullException.ThrowIfNull(migrations);
+
+        if (migrations.Count == 0)
+            throw new InvalidOperationException("没有可用于识别旧数据库结构的 EF 迁移。");
+
+        var actualSchema = SqliteSchemaSnapshot.Capture(connection);
+        var matchedMigrationCount = DetectMatchingMigrationCount(actualSchema, migrations, out var latestSchema);
+        if (matchedMigrationCount <= 0)
+        {
+            throw new InvalidOperationException(
+                "现有数据库没有 __EFMigrationsHistory，且结构无法与任何已知迁移版本可靠匹配。"
+                + "为避免重复建表或跳过必要迁移，已停止启动；请先备份并人工确认数据库版本。"
+                + $"结构差异：{actualSchema.DescribeDifference(latestSchema)}");
+        }
+
+        var appliedMigrations = migrations.Take(matchedMigrationCount).ToArray();
+        WriteHistory(connection, appliedMigrations);
+        return appliedMigrations;
+    }
+
+    private static int DetectMatchingMigrationCount(
+        SqliteSchemaSnapshot actualSchema,
+        IReadOnlyList<string> migrations,
+        out SqliteSchemaSnapshot latestSchema)
+    {
+        using var referenceConnection = new SqliteConnection("Data Source=:memory:");
+        referenceConnection.Open();
+
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(referenceConnection)
+            .Options;
+        using var referenceDb = new AppDbContext(options);
+        var migrator = referenceDb.GetService<IMigrator>();
+
+        var matchedMigrationCount = 0;
+        latestSchema = SqliteSchemaSnapshot.Empty;
+        for (var i = 0; i < migrations.Count; i++)
+        {
+            migrator.Migrate(migrations[i]);
+            latestSchema = SqliteSchemaSnapshot.Capture(referenceConnection);
+            if (actualSchema.Equals(latestSchema))
+                matchedMigrationCount = i + 1;
+        }
+
+        return matchedMigrationCount;
+    }
+
+    private static void WriteHistory(DbConnection connection, IReadOnlyList<string> migrations)
+    {
+        var productVersion = typeof(DbContext)
+            .Assembly
+            .GetName()
+            .Version?
+            .ToString(3) ?? "8.0.0";
+
+        using var transaction = connection.BeginTransaction();
+        using (var create = connection.CreateCommand())
+        {
+            create.Transaction = transaction;
+            create.CommandText = """
+                CREATE TABLE __EFMigrationsHistory (
+                    MigrationId TEXT NOT NULL CONSTRAINT PK___EFMigrationsHistory PRIMARY KEY,
+                    ProductVersion TEXT NOT NULL
+                );
+                """;
+            create.ExecuteNonQuery();
+        }
+
+        foreach (var migration in migrations)
+        {
+            using var insert = connection.CreateCommand();
+            insert.Transaction = transaction;
+            insert.CommandText = """
+                INSERT INTO __EFMigrationsHistory (MigrationId, ProductVersion)
+                VALUES ($id, $version);
+                """;
+
+            var idParameter = insert.CreateParameter();
+            idParameter.ParameterName = "$id";
+            idParameter.Value = migration;
+            insert.Parameters.Add(idParameter);
+
+            var versionParameter = insert.CreateParameter();
+            versionParameter.ParameterName = "$version";
+            versionParameter.Value = productVersion;
+            insert.Parameters.Add(versionParameter);
+
+            insert.ExecuteNonQuery();
+        }
+
+        transaction.Commit();
+    }
+
+    private sealed class SqliteSchemaSnapshot : IEquatable<SqliteSchemaSnapshot>
+    {
+        private readonly IReadOnlySet<string> entries;
+        private readonly string fingerprint;
+
+        internal static SqliteSchemaSnapshot Empty { get; } = new(Array.Empty<string>());
+
+        private SqliteSchemaSnapshot(IEnumerable<string> entries)
+        {
+            this.entries = entries.ToHashSet(StringComparer.Ordinal);
+            fingerprint = string.Join('\n', this.entries.Order(StringComparer.Ordinal));
+        }
+
+        internal static SqliteSchemaSnapshot Capture(DbConnection connection)
+        {
+            var entries = new List<string>();
+            var tables = ReadTableNames(connection);
+
+            foreach (var table in tables)
+            {
+                entries.Add($"table|{table}");
+                CaptureColumns(connection, table, entries);
+                CaptureIndexes(connection, table, entries);
+                CaptureForeignKeys(connection, table, entries);
+            }
+
+            return new SqliteSchemaSnapshot(entries);
+        }
+
+        public bool Equals(SqliteSchemaSnapshot? other)
+        {
+            return other != null
+                && string.Equals(fingerprint, other.fingerprint, StringComparison.Ordinal);
+        }
+
+        public override bool Equals(object? obj) => Equals(obj as SqliteSchemaSnapshot);
+
+        public override int GetHashCode() => StringComparer.Ordinal.GetHashCode(fingerprint);
+
+        internal string DescribeDifference(SqliteSchemaSnapshot expected)
+        {
+            var missing = expected.entries.Except(entries, StringComparer.Ordinal).Take(5).ToArray();
+            var extra = entries.Except(expected.entries, StringComparer.Ordinal).Take(5).ToArray();
+            return $"缺少 [{string.Join("；", missing)}]；额外 [{string.Join("；", extra)}]";
+        }
+
+        private static IReadOnlyList<string> ReadTableNames(DbConnection connection)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name <> '__EFMigrationsHistory'
+                  AND name NOT LIKE 'sqlite_%'
+                ORDER BY name COLLATE BINARY;
+                """;
+
+            using var reader = command.ExecuteReader();
+            var tables = new List<string>();
+            while (reader.Read())
+                tables.Add(reader.GetString(0));
+            return tables;
+        }
+
+        private static void CaptureColumns(DbConnection connection, string table, ICollection<string> entries)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA table_xinfo({ToSqliteLiteral(table)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                var name = reader.GetString(1);
+                var type = reader.IsDBNull(2) ? string.Empty : reader.GetString(2).Trim().ToUpperInvariant();
+                var notNull = reader.GetInt32(3);
+                var primaryKeyOrder = reader.GetInt32(5);
+                var hidden = reader.FieldCount > 6 ? reader.GetInt32(6) : 0;
+                // EnsureCreated 与 AddColumn 对同一最终列可能生成不同的数据库默认值；
+                // 默认值差异不代表该列可以安全地再次执行 AddColumn。
+                entries.Add($"column|{table}|{name}|{type}|{notNull}|{primaryKeyOrder}|{hidden}");
+            }
+        }
+
+        private static void CaptureIndexes(DbConnection connection, string table, ICollection<string> entries)
+        {
+            var indexes = new List<(string Name, int Unique, string Origin, int Partial)>();
+            using (var command = connection.CreateCommand())
+            {
+                command.CommandText = $"PRAGMA index_list({ToSqliteLiteral(table)});";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                {
+                    var name = reader.GetString(1);
+                    if (name.StartsWith("sqlite_autoindex_", StringComparison.Ordinal))
+                        continue;
+
+                    indexes.Add((
+                        name,
+                        reader.GetInt32(2),
+                        reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        reader.FieldCount > 4 ? reader.GetInt32(4) : 0));
+                }
+            }
+
+            foreach (var index in indexes.OrderBy(item => item.Name, StringComparer.Ordinal))
+            {
+                var columns = new List<string>();
+                using var command = connection.CreateCommand();
+                command.CommandText = $"PRAGMA index_info({ToSqliteLiteral(index.Name)});";
+                using var reader = command.ExecuteReader();
+                while (reader.Read())
+                    columns.Add(reader.IsDBNull(2) ? $"#{reader.GetInt32(1)}" : reader.GetString(2));
+
+                entries.Add(
+                    $"index|{table}|{index.Name}|{index.Unique}|{index.Origin}|{index.Partial}|{string.Join(',', columns)}");
+            }
+        }
+
+        private static void CaptureForeignKeys(DbConnection connection, string table, ICollection<string> entries)
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = $"PRAGMA foreign_key_list({ToSqliteLiteral(table)});";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                entries.Add(
+                    $"foreign-key|{table}|{reader.GetString(2)}|{reader.GetString(3)}|{reader.GetString(4)}|"
+                    + $"{reader.GetString(5)}|{reader.GetString(6)}|{reader.GetString(7)}");
+            }
+        }
+
+        private static string ToSqliteLiteral(string value) => $"'{value.Replace("'", "''")}'";
     }
 }

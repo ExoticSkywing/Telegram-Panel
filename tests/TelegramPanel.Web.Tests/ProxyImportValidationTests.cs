@@ -45,6 +45,40 @@ public sealed class ProxyImportValidationTests
         Assert.Empty(await db.OutboundProxies.AsNoTracking().ToListAsync());
     }
 
+    [Fact]
+    public async Task 批量导入格式错误不会在响应中回显代理凭据()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var probe = new ProxyEgressProbeService();
+        var warp = new WarpContainerManager(
+            db,
+            new ConfigurationBuilder().Build(),
+            probe,
+            NullLogger<WarpContainerManager>.Instance);
+        var service = new ProxyManagementService(
+            db,
+            new EmptyClientPool(),
+            probe,
+            warp,
+            NullLogger<ProxyManagementService>.Instance);
+        const string secret = "top-secret-proxy-token";
+        var raw = $"http://proxy-user:{secret}@";
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.ImportAsync(raw, testAfterImport: false));
+
+        Assert.Equal("代理地址格式无效，请检查协议、主机和端口", error.Message);
+        Assert.DoesNotContain(secret, error.Message);
+        Assert.DoesNotContain(raw, error.Message);
+        Assert.Empty(await db.OutboundProxies.AsNoTracking().ToListAsync());
+    }
     private sealed class EmptyClientPool : ITelegramClientPool
     {
         public int ActiveClientCount => 0;

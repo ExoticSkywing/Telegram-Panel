@@ -18,7 +18,8 @@
       <div class="import-proxy-heading">
         <span class="material-icons">vpn_lock</span>
         <div>
-          <div class="cell-main">导入账号代理</div>
+          <div class="cell-main">导入账号首次连接出口</div>
+          <div class="cell-sub">必须先选择；在 Session 验证前生效</div>
         </div>
       </div>
       <el-radio-group
@@ -27,10 +28,10 @@
         aria-label="导入账号连接方式"
         :disabled="busy"
       >
-        <el-radio-button value="global">全局设置</el-radio-button>
-        <el-radio-button value="direct">直连</el-radio-button>
         <el-radio-button value="existing">已有代理</el-radio-button>
         <el-radio-button value="warp_per_account" :disabled="!warpAvailable">每账号独立 WARP</el-radio-button>
+        <el-radio-button value="global">全局设置</el-radio-button>
+        <el-radio-button value="direct">直连（确认风险）</el-radio-button>
       </el-radio-group>
       <el-select
         v-if="proxyStrategy === 'existing'"
@@ -48,6 +49,15 @@
           :disabled="!proxy.isEnabled"
         />
       </el-select>
+      <div v-if="!proxyStrategy" class="proxy-route-notice warning">
+        为防止首个 Telegram 请求使用面板直连 IP，请明确选择已有代理或一键 WARP。
+      </div>
+      <div v-else-if="proxyStrategy === 'direct'" class="proxy-route-notice danger">
+        已明确选择直连：Telegram 从首次验证开始即可看到面板公网 IP。
+      </div>
+      <div v-else-if="proxyStrategy === 'global'" class="proxy-route-notice warning">
+        仅在已配置全局代理时可用；未配置会在首次连接前拒绝，请改选已有代理、WARP 或明确直连。
+      </div>
     </section>
 
     <el-card shadow="never" class="page-card import-card import-card-primary">
@@ -531,7 +541,7 @@ const rows = ref<Row[]>([])
 const categories = ref<AccountCategory[]>([])
 const dictionaries = ref<DataDictionary[]>([])
 const proxies = ref<OutboundProxy[]>([])
-const proxyStrategy = ref<AccountProxyStrategy>('global')
+const proxyStrategy = ref<AccountProxyStrategy | ''>('')
 const proxyId = ref<number | null>(null)
 const warpStatus = ref<WarpRuntimeStatus | null>(null)
 const tableRef = ref<TableInstance>()
@@ -553,7 +563,8 @@ const warpAvailable = computed(() => Boolean(
   && warpStatus.value.dockerAvailable,
 ))
 const proxySelectionInvalid = computed(() =>
-  (proxyStrategy.value === 'existing' && !proxyId.value)
+  !proxyStrategy.value
+  || (proxyStrategy.value === 'existing' && !proxyId.value)
   || (proxyStrategy.value === 'warp_per_account' && !warpAvailable.value),
 )
 const sessionImportDisabled = computed(() => busy.value || sessionFiles.value.length === 0 || shouldBlockApiImport.value || proxySelectionInvalid.value)
@@ -660,7 +671,11 @@ function onBatchAvatarRemove() {
 
 function ensureProxySelected() {
   if (!proxySelectionInvalid.value) return true
-  ElMessage.warning(proxyStrategy.value === 'warp_per_account' ? '当前环境无法创建 WARP' : '请选择已有代理')
+  if (!proxyStrategy.value) {
+    ElMessage.warning('请先明确选择导入账号首次连接使用的代理方式')
+  } else {
+    ElMessage.warning(proxyStrategy.value === 'warp_per_account' ? '当前环境无法创建 WARP' : '请选择已有代理')
+  }
   return false
 }
 
@@ -685,7 +700,7 @@ async function importZip() {
 
   const selectedZip = zipFile.value
   const selectedPassword = zipTwoFactorPassword.value
-  const selectedStrategy = proxyStrategy.value
+  const selectedStrategy = proxyStrategy.value as AccountProxyStrategy
   const selectedProxyId = proxyId.value
   const form = new FormData()
   form.append('file', selectedZip)
@@ -725,7 +740,7 @@ async function importSessionFiles() {
 
   const form = new FormData()
   files.forEach((file) => form.append('files', file))
-  const selectedStrategy = proxyStrategy.value
+  const selectedStrategy = proxyStrategy.value as AccountProxyStrategy
   const selectedProxyId = proxyId.value
   appendProxyFields(form, selectedStrategy, selectedProxyId)
 
@@ -754,7 +769,7 @@ async function importStringSession() {
   }
 
   const selectedSessionString = sessionString.value
-  const selectedStrategy = proxyStrategy.value
+  const selectedStrategy = proxyStrategy.value as AccountProxyStrategy
   const selectedProxyId = proxyId.value
   const operationToken = ++importOperationToken
   importingString.value = true
@@ -1194,7 +1209,7 @@ async function loadWarpStatus() {
     warpStatus.value = null
   }
   if (!warpAvailable.value && proxyStrategy.value === 'warp_per_account') {
-    proxyStrategy.value = 'global'
+    proxyStrategy.value = ''
   }
 }
 
@@ -1230,6 +1245,7 @@ onMounted(() => {
 
 .import-proxy-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 14px;
   width: min(100%, 1160px);
@@ -1261,6 +1277,21 @@ onMounted(() => {
 
 .proxy-select {
   width: min(360px, 100%);
+}
+
+.proxy-route-notice {
+  flex-basis: 100%;
+  padding-left: 36px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.proxy-route-notice.warning {
+  color: var(--el-color-warning-dark-2);
+}
+
+.proxy-route-notice.danger {
+  color: var(--el-color-danger);
 }
 
 .import-card {

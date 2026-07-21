@@ -7,6 +7,7 @@ using SixLabors.ImageSharp.Formats.Jpeg;
 using SixLabors.ImageSharp.Processing;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Models;
+using TelegramPanel.Core.Services.Proxy;
 using TelegramPanel.Data.Entities;
 using TL;
 using WTelegram;
@@ -23,6 +24,7 @@ public class AccountTelegramToolsService
     private readonly AccountManagementService _accountManagement;
     private readonly ITelegramClientPool _clientPool;
     private readonly IConfiguration _configuration;
+    private readonly IAccountProxyResolver _proxyResolver;
     private readonly ILogger<AccountTelegramToolsService> _logger;
     private readonly TelegramAccountUpdateHub _updateHub;
     private readonly ISessionPathResolver _sessionPathResolver;
@@ -31,6 +33,7 @@ public class AccountTelegramToolsService
         AccountManagementService accountManagement,
         ITelegramClientPool clientPool,
         IConfiguration configuration,
+        IAccountProxyResolver proxyResolver,
         ILogger<AccountTelegramToolsService> logger,
         TelegramAccountUpdateHub updateHub,
         ISessionPathResolver sessionPathResolver)
@@ -38,6 +41,7 @@ public class AccountTelegramToolsService
         _accountManagement = accountManagement;
         _clientPool = clientPool;
         _configuration = configuration;
+        _proxyResolver = proxyResolver;
         _logger = logger;
         _updateHub = updateHub;
         _sessionPathResolver = sessionPathResolver;
@@ -2014,16 +2018,26 @@ public class AccountTelegramToolsService
             throw new InvalidOperationException("账号缺少 SessionPath，无法创建 Telegram 客户端");
 
         var absoluteSessionPath = _sessionPathResolver.Resolve(account.SessionPath);
+        // 先释放可能仍会保存旧 Session 的客户端，避免其在转换完成后覆盖新文件。
+        await _clientPool.RemoveClientAsync(accountId);
         if (File.Exists(absoluteSessionPath) && SessionDataConverter.LooksLikeSqliteSession(absoluteSessionPath))
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            var proxyResolution = await _proxyResolver.ResolveAsync(accountId, cancellationToken);
+            var proxy = proxyResolution.Proxy
+                ?? (proxyResolution.UseGlobalProxy
+                    ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                    : null);
+
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(
                 phone: account.Phone,
-                apiId: account.ApiId,
-                apiHash: account.ApiHash,
+                apiId: apiId,
+                apiHash: apiHash,
                 sqliteSessionPath: absoluteSessionPath,
-                logger: _logger
+                logger: _logger,
+                proxy: proxy,
+                cancellationToken: cancellationToken
             );
 
             if (!converted.Ok)
@@ -2034,7 +2048,6 @@ public class AccountTelegramToolsService
             }
         }
 
-        await _clientPool.RemoveClientAsync(accountId);
         cancellationToken.ThrowIfCancellationRequested();
 
         var client = await _clientPool.GetOrCreateClientAsync(

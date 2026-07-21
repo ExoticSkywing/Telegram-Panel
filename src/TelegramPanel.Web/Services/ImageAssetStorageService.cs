@@ -155,6 +155,21 @@ public sealed class ImageAssetStorageService
         return path;
     }
 
+    internal static string ResolveUploadsRootPath(
+        IConfiguration configuration,
+        IWebHostEnvironment environment)
+    {
+        var persistentRoot = StoragePathResolver.ResolvePersistentRoot(configuration);
+        if (!string.IsNullOrWhiteSpace(persistentRoot))
+            return Path.Combine(persistentRoot, "uploads");
+
+        var webRoot = environment.WebRootPath;
+        if (string.IsNullOrWhiteSpace(webRoot))
+            webRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
+
+        return Path.Combine(webRoot, "uploads");
+    }
+
     private static string NormalizeScope(string? scope)
     {
         var raw = (scope ?? string.Empty).Trim().Replace('\\', '/');

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -100,10 +101,10 @@ public sealed partial class ProxyManagementService
             };
             using var client = new HttpClient(handler)
             {
-                BaseAddress = new Uri(proxy.ResinAdminUrl),
+                BaseAddress = BuildResinAdminBaseAddress(proxy.ResinAdminUrl),
                 Timeout = TimeSpan.FromSeconds(10)
             };
-            using var healthRequest = new HttpRequestMessage(HttpMethod.Get, "/healthz");
+            using var healthRequest = new HttpRequestMessage(HttpMethod.Get, "healthz");
             using var health = await client.SendAsync(
                 healthRequest,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -116,7 +117,7 @@ public sealed partial class ProxyManagementService
                 client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
                     "Bearer",
                     proxy.ResinAdminToken);
-                using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/system/info");
+                using var request = new HttpRequestMessage(HttpMethod.Get, "api/v1/system/info");
                 using var response = await client.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
@@ -124,7 +125,16 @@ public sealed partial class ProxyManagementService
                 if (!response.IsSuccessStatusCode)
                     return $"Resin 管理鉴权返回 HTTP {(int)response.StatusCode}";
 
-                var platformId = await ResolveResinPlatformIdAsync(client, proxy, cancellationToken);
+                var authVersionError = await ValidateResinAuthVersionAsync(
+                    response,
+                    cancellationToken);
+                if (authVersionError != null)
+                    return authVersionError;
+
+                var platformId = await ResolveResinPlatformIdAsync(
+                    client,
+                    proxy,
+                    cancellationToken);
                 if (platformId == null)
                     return $"Resin Platform {proxy.ResinPlatform ?? "Default"} 不存在";
             }
@@ -135,6 +145,30 @@ public sealed partial class ProxyManagementService
         {
             return $"Resin 控制面不可用：{SafeError(ex)}";
         }
+    }
+
+    private static Uri BuildResinAdminBaseAddress(string adminUrl) =>
+        new($"{adminUrl.TrimEnd('/')}/", UriKind.Absolute);
+
+    private static async Task<string?> ValidateResinAuthVersionAsync(
+        HttpResponseMessage response,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var document = await JsonDocument.ParseAsync(
+            stream,
+            cancellationToken: cancellationToken);
+        if (!document.RootElement.TryGetProperty("auth_version", out var authVersionElement)
+            || authVersionElement.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        var authVersion = authVersionElement.GetString();
+        return string.IsNullOrWhiteSpace(authVersion)
+               || string.Equals(authVersion, "V1", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : $"Resin 当前认证模式为 {authVersion}，账号粘性接入需要 RESIN_AUTH_VERSION=V1";
     }
 
     private async Task ReleaseResinLeaseAsync(
@@ -148,21 +182,142 @@ public sealed partial class ProxyManagementService
             cancellationToken);
 
     public async Task ReleaseImportResinLeaseBestEffortAsync(
-        int proxyId,
+        ResinLeaseControlSnapshot snapshot,
         string stableImportKey,
         CancellationToken cancellationToken = default)
     {
-        var proxy = await _db.OutboundProxies
-            .AsNoTracking()
-            .FirstOrDefaultAsync(x => x.Id == proxyId, cancellationToken);
-        if (proxy?.Kind != OutboundProxyKinds.Resin || string.IsNullOrWhiteSpace(stableImportKey))
+        ArgumentNullException.ThrowIfNull(snapshot);
+        if (string.IsNullOrWhiteSpace(stableImportKey))
             return;
+
+        // 不重新查询数据库：代理可能已被删除或修改，必须使用创建 Lease 时的旧控制面身份。
+        var proxy = new OutboundProxy
+        {
+            Id = snapshot.ProxyId,
+            Kind = OutboundProxyKinds.Resin,
+            ResinAdminUrl = snapshot.AdminUrl,
+            ResinAdminToken = snapshot.AdminToken,
+            ResinPlatform = snapshot.Platform
+        };
 
         await ReleaseResinLeaseBestEffortAsync(
             proxy,
             stableImportKey.Trim(),
             $"导入身份 {stableImportKey.Trim()}",
             cancellationToken);
+    }
+
+    /// <summary>
+    /// 将导入验证阶段的临时 Resin Lease 复制到账号的稳定身份。
+    /// Resin 的该接口使用数据面 Proxy Token，而不是 Admin Token。
+    /// </summary>
+    public async Task<bool> InheritImportResinLeaseBestEffortAsync(
+        ProxyConnectionOptions connection,
+        string? platform,
+        string temporaryAccountKey,
+        string stableAccountKey,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(connection);
+        if (connection.Kind != OutboundProxyKinds.Resin
+            || string.IsNullOrWhiteSpace(connection.Host)
+            || connection.Port is < 1 or > 65535
+            || string.IsNullOrWhiteSpace(temporaryAccountKey)
+            || string.IsNullOrWhiteSpace(stableAccountKey))
+        {
+            return false;
+        }
+
+        temporaryAccountKey = temporaryAccountKey.Trim();
+        stableAccountKey = stableAccountKey.Trim();
+        if (string.Equals(temporaryAccountKey, stableAccountKey, StringComparison.Ordinal))
+            return true;
+
+        var platformName = string.IsNullOrWhiteSpace(platform) ? "Default" : platform.Trim();
+        try
+        {
+            await SendResinLeaseInheritanceAsync(
+                connection,
+                platformName,
+                temporaryAccountKey,
+                stableAccountKey,
+                cancellationToken);
+            return true;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // 兼容尚未提供 inherit-lease Action 的旧版 Resin；导入仍可使用最终稳定身份。
+            _logger.LogWarning(
+                ex,
+                "Failed to inherit Resin lease {TemporaryAccountKey} to "
+                + "{StableAccountKey} for proxy {ProxyId}",
+                temporaryAccountKey,
+                stableAccountKey,
+                connection.ProxyId);
+            return false;
+        }
+    }
+
+    private static async Task SendResinLeaseInheritanceAsync(
+        ProxyConnectionOptions connection,
+        string platform,
+        string temporaryAccountKey,
+        string stableAccountKey,
+        CancellationToken cancellationToken)
+    {
+        using var handler = new SocketsHttpHandler
+        {
+            UseProxy = false,
+            AllowAutoRedirect = false,
+            ConnectTimeout = TimeSpan.FromSeconds(5)
+        };
+        using var client = new HttpClient(handler)
+        {
+            BaseAddress = new UriBuilder(
+                Uri.UriSchemeHttp,
+                connection.Host,
+                connection.Port).Uri,
+            Timeout = TimeSpan.FromSeconds(10)
+        };
+        var body = JsonSerializer.Serialize(new
+        {
+            parent_account = temporaryAccountKey,
+            new_account = stableAccountKey
+        });
+        // Resin 在 Proxy Token 为空时仍接受任意占位路径段调用该 Action。
+        var proxyTokenPath = Uri.EscapeDataString(
+            string.IsNullOrEmpty(connection.Password) ? "telegram-panel" : connection.Password);
+        var platformPath = Uri.EscapeDataString(platform);
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"/{proxyTokenPath}/api/v1/{platformPath}/actions/inherit-lease")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+        using var response = await client.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException(
+                $"Resin Lease 继承返回 HTTP {(int)response.StatusCode}");
+        }
+    }
+
+    internal Task ReleaseAccountClientAsync(int accountId)
+    {
+        return accountId > 0
+            ? _clientPool.RemoveClientAsync(accountId)
+            : Task.CompletedTask;
+    }
+
+    internal Task ReleaseAccountClientStrictAsync(int accountId)
+    {
+        return accountId > 0
+            ? _clientPool.RemoveClientStrictAsync(accountId)
+            : Task.CompletedTask;
     }
 
     private async Task ReleaseResinLeaseAsync(
@@ -188,7 +343,7 @@ public sealed partial class ProxyManagementService
         };
         using var client = new HttpClient(handler)
         {
-            BaseAddress = new Uri(proxy.ResinAdminUrl),
+            BaseAddress = BuildResinAdminBaseAddress(proxy.ResinAdminUrl),
             Timeout = TimeSpan.FromSeconds(10)
         };
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
@@ -208,7 +363,7 @@ public sealed partial class ProxyManagementService
         var platformKey = Uri.EscapeDataString(platformId);
         using var request = new HttpRequestMessage(
             HttpMethod.Delete,
-            $"/api/v1/platforms/{platformKey}/leases/{accountKey}");
+            $"api/v1/platforms/{platformKey}/leases/{accountKey}");
         using var response = await client.SendAsync(
             request,
             HttpCompletionOption.ResponseHeadersRead,
@@ -231,7 +386,10 @@ public sealed partial class ProxyManagementService
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to release Resin lease for account {AccountId}", accountId);
+            _logger.LogWarning(
+                ex,
+                "Failed to release Resin lease for account {AccountId}",
+                accountId);
         }
     }
 
@@ -260,25 +418,80 @@ public sealed partial class ProxyManagementService
         OutboundProxy proxy,
         CancellationToken cancellationToken)
     {
+        const int pageLimit = 100;
+        const int maxPages = 100;
         var platformName = string.IsNullOrWhiteSpace(proxy.ResinPlatform)
             ? "Default"
             : proxy.ResinPlatform.Trim();
-        var path = $"/api/v1/platforms?keyword={Uri.EscapeDataString(platformName)}&limit=100&offset=0";
-        using var request = new HttpRequestMessage(HttpMethod.Get, path);
-        using var response = await client.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            cancellationToken);
-        if (!response.IsSuccessStatusCode)
+        var keyword = Uri.EscapeDataString(platformName);
+        for (var page = 0; page < maxPages; page++)
         {
-            throw new InvalidOperationException(
-                $"Resin Platform 查询返回 HTTP {(int)response.StatusCode}");
+            var offset = page * pageLimit;
+            var path = $"api/v1/platforms?keyword={keyword}"
+                       + $"&limit={pageLimit}&offset={offset}";
+            using var request = new HttpRequestMessage(HttpMethod.Get, path);
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new InvalidOperationException(
+                    $"Resin Platform 查询返回 HTTP {(int)response.StatusCode}");
+            }
+
+            using var document = await ReadLimitedResinJsonAsync(
+                response,
+                "Resin Platform 查询",
+                cancellationToken);
+            if (!document.RootElement.TryGetProperty("items", out var items)
+                || items.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException("Resin Platform 查询响应缺少 items 数组");
+            }
+
+            foreach (var item in items.EnumerateArray())
+            {
+                if (!item.TryGetProperty("name", out var name)
+                    || !string.Equals(
+                        name.GetString(),
+                        platformName,
+                        StringComparison.OrdinalIgnoreCase)
+                    || !item.TryGetProperty("id", out var id)
+                    || string.IsNullOrWhiteSpace(id.GetString()))
+                {
+                    continue;
+                }
+                return id.GetString();
+            }
+
+            var itemCount = items.GetArrayLength();
+            if (itemCount < pageLimit || ReachedResinPlatformTotal(document, offset, itemCount))
+                return null;
         }
 
+        throw new InvalidDataException($"Resin Platform 查询超过 {maxPages * pageLimit} 条上限");
+    }
+
+    private static bool ReachedResinPlatformTotal(
+        JsonDocument document,
+        int offset,
+        int itemCount)
+    {
+        return document.RootElement.TryGetProperty("total", out var totalElement)
+               && totalElement.TryGetInt32(out var total)
+               && offset + itemCount >= total;
+    }
+
+    private static async Task<JsonDocument> ReadLimitedResinJsonAsync(
+        HttpResponseMessage response,
+        string subject,
+        CancellationToken cancellationToken)
+    {
         if (response.Content.Headers.ContentLength is > MaxResinControlPlaneResponseBytes)
         {
             throw new InvalidDataException(
-                $"Resin Platform 查询响应超过 {MaxResinControlPlaneResponseBytes / 1024}KB 限制");
+                $"{subject}响应超过 {MaxResinControlPlaneResponseBytes / 1024}KB 限制");
         }
 
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -297,32 +510,14 @@ public sealed partial class ProxyManagementService
             if (totalBytes > MaxResinControlPlaneResponseBytes)
             {
                 throw new InvalidDataException(
-                    $"Resin Platform 查询响应超过 {MaxResinControlPlaneResponseBytes / 1024}KB 限制");
+                    $"{subject}响应超过 {MaxResinControlPlaneResponseBytes / 1024}KB 限制");
             }
 
             await limited.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
         }
 
         limited.Position = 0;
-        using var document = await JsonDocument.ParseAsync(limited, cancellationToken: cancellationToken);
-        if (!document.RootElement.TryGetProperty("items", out var items)
-            || items.ValueKind != JsonValueKind.Array)
-        {
-            throw new InvalidDataException("Resin Platform 查询响应缺少 items 数组");
-        }
-
-        foreach (var item in items.EnumerateArray())
-        {
-            if (!item.TryGetProperty("name", out var name)
-                || !string.Equals(name.GetString(), platformName, StringComparison.OrdinalIgnoreCase)
-                || !item.TryGetProperty("id", out var id)
-                || string.IsNullOrWhiteSpace(id.GetString()))
-            {
-                continue;
-            }
-            return id.GetString();
-        }
-        return null;
+        return await JsonDocument.ParseAsync(limited, cancellationToken: cancellationToken);
     }
 
     private async Task DeleteUnusedProxyCoreAsync(
@@ -345,7 +540,10 @@ public sealed partial class ProxyManagementService
             proxy.WarpProfile.DesiredEnabled = false;
             proxy.WarpProfile.UpdatedAtUtc = DateTime.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
-            await _warpManager.DeleteResourcesAsync(proxy.WarpProfile, purgeData: true, cancellationToken);
+            await _warpManager.DeleteResourcesAsync(
+                proxy.WarpProfile,
+                purgeData: true,
+                cancellationToken);
         }
 
         _db.OutboundProxies.Remove(proxy);
@@ -355,7 +553,9 @@ public sealed partial class ProxyManagementService
     private static string SafeError(Exception exception)
     {
         var messages = new List<string>();
-        for (var current = exception; current != null && messages.Count < 3; current = current.InnerException)
+        for (var current = exception;
+             current != null && messages.Count < 3;
+             current = current.InnerException)
         {
             var message = current.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
             if (message.Length > 500)

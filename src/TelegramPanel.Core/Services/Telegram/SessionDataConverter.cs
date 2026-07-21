@@ -255,7 +255,9 @@ public static class SessionDataConverter
             using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
                 DataSource = sqliteSessionPath,
-                Mode = SqliteOpenMode.ReadOnly
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Private,
+                Pooling = false
             }.ToString());
             connection.Open();
 
@@ -285,7 +287,7 @@ public static class SessionDataConverter
                 return false;
             }
 
-            if (port <= 0)
+            if (port is < 1 or > ushort.MaxValue)
             {
                 reason = $"port 无效：{port}";
                 return false;

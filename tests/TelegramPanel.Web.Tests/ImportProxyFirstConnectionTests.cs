@@ -1,5 +1,8 @@
-using System.Reflection;
+using System.Collections.Concurrent;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -28,6 +31,11 @@ public sealed class ImportProxyFirstConnectionTests
     {
         await using var fixture = await ImportFixture.CreateAsync(protocol);
         fixture.Importer.BeforeImport = () => Assert.Empty(fixture.Db.Accounts);
+        fixture.ClientPool.OnRemoveClientAsync = async _ =>
+        {
+            var staged = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+            Assert.False(staged.IsActive);
+        };
 
         var result = await fixture.Service.ImportFromStringSessionAsync(
             "session-data",
@@ -42,6 +50,154 @@ public sealed class ImportProxyFirstConnectionTests
         Assert.Equal(
             fixture.Proxy.Id,
             await fixture.Db.Accounts.AsNoTracking().Select(x => x.ProxyId).SingleAsync());
+        Assert.True(await fixture.Db.Accounts.AsNoTracking().Select(x => x.IsActive).SingleAsync());
+    }
+
+    [Fact]
+    public async Task 绑定失败时导入账号保持停用且不会使用默认路由()
+    {
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+        var disabled = false;
+        fixture.ClientPool.OnRemoveClientAsync = async _ =>
+        {
+            if (disabled)
+                return;
+            disabled = true;
+            fixture.Proxy.IsEnabled = false;
+            await fixture.Db.SaveChangesAsync();
+        };
+
+        var result = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+
+        Assert.True(result.Success);
+        Assert.Contains("保持停用", result.Error);
+        var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+        Assert.False(account.IsActive);
+        Assert.Null(account.ProxyId);
+    }
+
+    [Fact]
+    public async Task 导入验证期间代理连接参数变化时保持停用并拒绝切换出口()
+    {
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+        var validationHost = fixture.Proxy.Host;
+        fixture.ClientPool.OnRemoveClientAsync = async _ =>
+        {
+            fixture.Proxy.Host = "127.0.0.2";
+            await fixture.Db.SaveChangesAsync();
+        };
+
+        var result = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+
+        Assert.True(result.Success);
+        Assert.Equal(validationHost, fixture.Importer.SeenProxy?.Host);
+        Assert.Contains("连接参数已变化", result.Error);
+        var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+        Assert.False(account.IsActive);
+        Assert.Null(account.ProxyId);
+    }
+
+    [Fact]
+    public async Task 同批重复账号首次绑定失败后后续条目会重试绑定()
+    {
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+        var failedOnce = false;
+        fixture.ClientPool.OnRemoveClientAsync = _ =>
+        {
+            if (failedOnce)
+                return Task.CompletedTask;
+
+            failedOnce = true;
+            throw new InvalidOperationException("模拟首次释放客户端失败");
+        };
+        var files = new[]
+        {
+            new AccountImportFile("first.session", new MemoryStream(new byte[] { 1 })),
+            new AccountImportFile("second.session", new MemoryStream(new byte[] { 2 }))
+        };
+
+        try
+        {
+            var results = await fixture.Service.ImportFromSessionFileStreamsAsync(
+                files,
+                12345,
+                "0123456789abcdef0123456789abcdef",
+                proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+
+            Assert.Equal(2, results.Count);
+            Assert.True(results[0].Success);
+            Assert.Contains("保持停用", results[0].Error);
+            Assert.True(results[1].Success, results[1].Error);
+            var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+            Assert.True(account.IsActive);
+            Assert.Equal(fixture.Proxy.Id, account.ProxyId);
+        }
+        finally
+        {
+            foreach (var file in files)
+                await file.Content.DisposeAsync();
+        }
+    }
+
+    [Fact]
+    public async Task 同批重复账号会继承每次验证使用的最新Resin出口()
+    {
+        await using var resin = new ResinTokenActionStub();
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+        fixture.Proxy.Kind = OutboundProxyKinds.Resin;
+        fixture.Proxy.ResinPlatform = "Default";
+        fixture.Proxy.Host = resin.BaseAddress.Host;
+        fixture.Proxy.Port = resin.BaseAddress.Port;
+        fixture.Proxy.Password = "proxy-token";
+        await fixture.Db.SaveChangesAsync();
+
+        var files = new[]
+        {
+            new AccountImportFile("first.session", new MemoryStream(new byte[] { 1 })),
+            new AccountImportFile("second.session", new MemoryStream(new byte[] { 2 }))
+        };
+
+        try
+        {
+            var results = await fixture.Service.ImportFromSessionFileStreamsAsync(
+                files,
+                12345,
+                "0123456789abcdef0123456789abcdef",
+                proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+
+            Assert.Equal(2, results.Count);
+            Assert.All(results, result => Assert.True(result.Success, result.Error));
+
+            var temporaryIdentities = fixture.Importer.SeenProxies
+                .Select(proxy => proxy?.Username)
+                .Where(username => !string.IsNullOrWhiteSpace(username))
+                .Select(username => username!["Default.".Length..])
+                .ToArray();
+            Assert.Equal(2, temporaryIdentities.Length);
+            Assert.NotEqual(temporaryIdentities[0], temporaryIdentities[1]);
+
+            var inheritRequests = resin.Requests.ToArray();
+            Assert.Equal(2, inheritRequests.Length);
+            Assert.Contains($"\"parent_account\":\"{temporaryIdentities[0]}\"", inheritRequests[0]);
+            Assert.Contains($"\"parent_account\":\"{temporaryIdentities[1]}\"", inheritRequests[1]);
+
+            var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+            Assert.True(account.IsActive);
+            Assert.Equal(fixture.Proxy.Id, account.ProxyId);
+        }
+        finally
+        {
+            foreach (var file in files)
+                await file.Content.DisposeAsync();
+        }
     }
 
     [Fact]
@@ -93,6 +249,24 @@ public sealed class ImportProxyFirstConnectionTests
     }
 
     [Fact]
+    public async Task 未配置全局代理时不会静默降级为直连导入()
+    {
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+
+        var result = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("global"));
+
+        Assert.False(result.Success);
+        Assert.Contains("全局代理尚未配置", result.Error);
+        Assert.Equal(0, fixture.Importer.ImportCount);
+        Assert.Null(fixture.Importer.SeenProxy);
+        Assert.Empty(await fixture.Db.Accounts.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
     public async Task WARP环境不可用时不会开始首次Telegram验证()
     {
         await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
@@ -112,7 +286,7 @@ public sealed class ImportProxyFirstConnectionTests
     }
 
     [Fact]
-    public async Task 缺省导入策略会在首次验证使用全局代理并保存继承模式()
+    public async Task 未传代理策略时在首次连接前拒绝导入()
     {
         await using var fixture = await ImportFixture.CreateAsync(
             OutboundProxyProtocols.Http,
@@ -127,19 +301,23 @@ public sealed class ImportProxyFirstConnectionTests
             12345,
             "0123456789abcdef0123456789abcdef");
 
-        Assert.True(result.Success, result.Error);
-        Assert.Equal("127.0.0.3", fixture.Importer.SeenProxy?.Host);
-        var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
-        Assert.Null(account.ProxyId);
-        Assert.True(account.UseGlobalProxy);
+        Assert.False(result.Success);
+        Assert.Contains("明确选择", result.Error);
+        Assert.Equal(0, fixture.Importer.ImportCount);
+        Assert.Null(fixture.Importer.SeenProxy);
+        Assert.Empty(await fixture.Db.Accounts.AsNoTracking().ToListAsync());
     }
 
     [Fact]
     public async Task 相同来源的两次Resin导入使用不同临时Lease身份()
     {
+        await using var resin = new ResinTokenActionStub();
         await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
         fixture.Proxy.Kind = OutboundProxyKinds.Resin;
         fixture.Proxy.ResinPlatform = "Default";
+        fixture.Proxy.Host = resin.BaseAddress.Host;
+        fixture.Proxy.Port = resin.BaseAddress.Port;
+        fixture.Proxy.Password = "proxy-token";
         await fixture.Db.SaveChangesAsync();
 
         var first = await fixture.Service.ImportFromStringSessionAsync(
@@ -162,6 +340,54 @@ public sealed class ImportProxyFirstConnectionTests
         Assert.Equal(2, usernames.Length);
         Assert.All(usernames, username => Assert.StartsWith("Default.tg_import_", username));
         Assert.NotEqual(usernames[0], usernames[1]);
+
+        var accountId = await fixture.Db.Accounts.AsNoTracking().Select(x => x.Id).SingleAsync();
+        var inheritRequests = resin.Requests.ToArray();
+        Assert.Equal(2, inheritRequests.Length);
+        var inheritRequest = inheritRequests[0];
+        Assert.Contains(
+            "POST /proxy-token/api/v1/Default/actions/inherit-lease HTTP/1.1",
+            inheritRequest);
+        var temporaryIdentity = usernames[0]!["Default.".Length..];
+        Assert.Contains($"\"parent_account\":\"{temporaryIdentity}\"", inheritRequest);
+        Assert.Contains($"\"new_account\":\"tg_account_{accountId}\"", inheritRequest);
+        var secondTemporaryIdentity = usernames[1]!["Default.".Length..];
+        Assert.Contains($"\"parent_account\":\"{secondTemporaryIdentity}\"", inheritRequests[1]);
+        Assert.Contains($"\"new_account\":\"tg_account_{accountId}\"", inheritRequests[1]);
+    }
+
+    [Fact]
+    public async Task Resin租约继承不可用时导入账号保持停用()
+    {
+        await using var fixture = await ImportFixture.CreateAsync(OutboundProxyProtocols.Http);
+        fixture.Proxy.Kind = OutboundProxyKinds.Resin;
+        fixture.Proxy.ResinPlatform = "Default";
+        fixture.Proxy.Host = "127.0.0.1";
+        fixture.Proxy.Port = 1;
+        fixture.Proxy.Password = "proxy-token";
+        await fixture.Db.SaveChangesAsync();
+
+        var result = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+
+        Assert.True(result.Success);
+        Assert.Contains("无法保证正式连接沿用验证出口", result.Error);
+        Assert.Contains("保持停用", result.Error);
+
+        var retry = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data-retry",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("existing", fixture.Proxy.Id));
+        Assert.True(retry.Success);
+        Assert.Contains("无法保证正式连接沿用验证出口", retry.Error);
+        Assert.Contains("保持停用", retry.Error);
+        var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+        Assert.False(account.IsActive);
+        Assert.Equal(fixture.Proxy.Id, account.ProxyId);
     }
 
     [Fact]
@@ -200,7 +426,8 @@ public sealed class ImportProxyFirstConnectionTests
         await using var zipStream = new MemoryStream();
         using (var archive = new ZipArchive(zipStream, ZipArchiveMode.Create, leaveOpen: true))
         {
-            for (var index = 1; index <= AccountImportService.MaxPerAccountWarpBatchSize + 1; index++)
+            var fileCount = AccountImportService.MaxPerAccountWarpBatchSize + 1;
+            for (var index = 1; index <= fileCount; index++)
             {
                 var entry = archive.CreateEntry($"{index}/{index}.json");
                 await using var content = entry.Open();
@@ -443,19 +670,22 @@ public sealed class ImportProxyFirstConnectionTests
             AppDbContext db,
             RecordingSessionImporter importer,
             AccountImportService service,
-            OutboundProxy proxy)
+            OutboundProxy proxy,
+            StubClientPool clientPool)
         {
             _connection = connection;
             Db = db;
             Importer = importer;
             Service = service;
             Proxy = proxy;
+            ClientPool = clientPool;
         }
 
         public AppDbContext Db { get; }
         public RecordingSessionImporter Importer { get; }
         public AccountImportService Service { get; }
         public OutboundProxy Proxy { get; }
+        public StubClientPool ClientPool { get; }
 
         public static async Task<ImportFixture> CreateAsync(
             string protocol,
@@ -515,9 +745,10 @@ public sealed class ImportProxyFirstConnectionTests
                 accountManagement,
                 NullLogger<AccountImportService>.Instance,
                 configuration,
-                proxyManagement);
+                proxyManagement,
+                new TemporaryWarpClaimStore());
 
-            return new ImportFixture(connection, db, importer, service, proxy);
+            return new ImportFixture(connection, db, importer, service, proxy, pool);
         }
 
         public async ValueTask DisposeAsync()
@@ -582,6 +813,7 @@ public sealed class ImportProxyFirstConnectionTests
     private sealed class StubClientPool : ITelegramClientPool
     {
         public int ActiveClientCount => 0;
+        public Func<int, Task>? OnRemoveClientAsync { get; set; }
 
         public Task<Client> GetOrCreateClientAsync(
             int accountId,
@@ -594,8 +826,108 @@ public sealed class ImportProxyFirstConnectionTests
             throw new NotSupportedException();
 
         public Client? GetClient(int accountId) => null;
-        public Task RemoveClientAsync(int accountId) => Task.CompletedTask;
+        public Task RemoveClientAsync(int accountId) =>
+            OnRemoveClientAsync?.Invoke(accountId) ?? Task.CompletedTask;
         public Task RemoveAllClientsAsync() => Task.CompletedTask;
         public bool IsClientConnected(int accountId) => false;
+    }
+
+    private sealed class ResinTokenActionStub : IAsyncDisposable
+    {
+        private readonly TcpListener _listener = new(IPAddress.Loopback, 0);
+        private readonly CancellationTokenSource _stop = new();
+        private readonly ConcurrentQueue<string> _requests = new();
+        private readonly Task _serveTask;
+
+        public ResinTokenActionStub()
+        {
+            _listener.Start();
+            var port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            BaseAddress = new Uri($"http://127.0.0.1:{port}/");
+            _serveTask = ServeAsync();
+        }
+
+        public Uri BaseAddress { get; }
+
+        public IReadOnlyCollection<string> Requests => _requests.ToArray();
+
+        public async ValueTask DisposeAsync()
+        {
+            _stop.Cancel();
+            _listener.Stop();
+            try
+            {
+                await _serveTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            finally
+            {
+                _stop.Dispose();
+            }
+        }
+
+        private async Task ServeAsync()
+        {
+            try
+            {
+                while (!_stop.IsCancellationRequested)
+                {
+                    using var client = await _listener.AcceptTcpClientAsync(_stop.Token);
+                    await HandleAsync(client, _stop.Token);
+                }
+            }
+            catch (Exception ex) when (_stop.IsCancellationRequested
+                                       && ex is OperationCanceledException
+                                           or SocketException
+                                           or ObjectDisposedException)
+            {
+            }
+        }
+
+        private async Task HandleAsync(TcpClient client, CancellationToken cancellationToken)
+        {
+            await using var stream = client.GetStream();
+            using var reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: false,
+                leaveOpen: true);
+            var requestLine = await reader.ReadLineAsync(cancellationToken) ?? string.Empty;
+            var contentLength = 0;
+            string? header;
+            while (!string.IsNullOrEmpty(header = await reader.ReadLineAsync(cancellationToken)))
+            {
+                if (header.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+                {
+                    _ = int.TryParse(
+                        header["Content-Length:".Length..].Trim(),
+                        out contentLength);
+                }
+            }
+
+            var bodyChars = new char[contentLength];
+            var charsRead = 0;
+            while (charsRead < bodyChars.Length)
+            {
+                var read = await reader.ReadAsync(
+                    bodyChars.AsMemory(charsRead, bodyChars.Length - charsRead),
+                    cancellationToken);
+                if (read == 0)
+                    break;
+                charsRead += read;
+            }
+            _requests.Enqueue($"{requestLine}\n{new string(bodyChars, 0, charsRead)}");
+
+            var responseBody = Encoding.UTF8.GetBytes("{}");
+            var responseHeaders = Encoding.ASCII.GetBytes(
+                "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/json\r\n"
+                + $"Content-Length: {responseBody.Length}\r\n"
+                + "Connection: close\r\n\r\n");
+            await stream.WriteAsync(responseHeaders, cancellationToken);
+            await stream.WriteAsync(responseBody, cancellationToken);
+        }
     }
 }

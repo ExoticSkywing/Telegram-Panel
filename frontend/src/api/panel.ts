@@ -240,14 +240,23 @@ export const panelApi = {
   importAccountsStringSession: (payload: {
     sessionString: string
     categoryId?: number | null
-    proxyStrategy?: AccountProxyStrategy
+    proxyStrategy: AccountProxyStrategy
     proxyId?: number | null
   }) =>
     api.post<ImportAccountsResponse>('/accounts/import/string-session', payload, { timeout: 900_000 }).then((r) => r.data),
-  startAccountLogin: (payload: { phone: string; loginId?: number }) =>
-    api.post<AccountLoginResponse>('/accounts/login/start', payload, { timeout: 120_000 }).then((r) => r.data),
-  startAccountQrLogin: (loginId?: number) =>
-    api.post<AccountQrLoginResponse>('/accounts/login/qr/start', { loginId: loginId || 0 }, { timeout: 120_000 }).then((r) => r.data),
+  startAccountLogin: (payload: {
+    phone: string
+    loginId?: number
+    proxyStrategy: AccountProxyStrategy
+    proxyId?: number | null
+  }) =>
+    api.post<AccountLoginResponse>('/accounts/login/start', payload, { timeout: 900_000 }).then((r) => r.data),
+  startAccountQrLogin: (payload: {
+    loginId?: number
+    proxyStrategy: AccountProxyStrategy
+    proxyId?: number | null
+  }) =>
+    api.post<AccountQrLoginResponse>('/accounts/login/qr/start', { ...payload, loginId: payload.loginId || 0 }, { timeout: 900_000 }).then((r) => r.data),
   pollAccountQrLogin: (loginId: number) =>
     api.post<AccountQrLoginResponse>('/accounts/login/qr/poll', { loginId }, { timeout: 120_000 }).then((r) => r.data),
   submitAccountQrLoginPassword: (loginId: number, password: string, saveTwoFactorPassword = false) =>

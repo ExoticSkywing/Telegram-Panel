@@ -34,19 +34,96 @@ public sealed class ProxyLifecycleRegressionTests
 
         var account = NewAccount(NewProxy("routing-mode"));
         account.Proxy = null;
+        account.IsActive = true;
         db.Accounts.Add(account);
         await db.SaveChangesAsync();
-        var service = CreateProxyService(db, new RecordingClientPool());
+        var service = CreateProxyService(
+            db,
+            new RecordingClientPool(),
+            GlobalProxyConfiguration());
 
         await service.BindAccountsAsync(
             new[] { account.Id },
             new AccountProxyBindingInput("direct"));
         Assert.False((await db.Accounts.AsNoTracking().SingleAsync()).UseGlobalProxy);
+        Assert.True((await db.Accounts.AsNoTracking().SingleAsync()).IsActive);
 
         await service.BindAccountsAsync(
             new[] { account.Id },
             new AccountProxyBindingInput("global"));
         Assert.True((await db.Accounts.AsNoTracking().SingleAsync()).UseGlobalProxy);
+        Assert.True((await db.Accounts.AsNoTracking().SingleAsync()).IsActive);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" ")]
+    public async Task 缺少代理策略时拒绝且不会静默切换为直连(string? strategy)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy("missing-strategy-guard");
+        var account = NewAccount(proxy);
+        account.IsActive = true;
+        account.UseGlobalProxy = false;
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+        var service = CreateProxyService(db, new RecordingClientPool());
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.BindAccountsAsync(
+                new[] { account.Id },
+                new AccountProxyBindingInput(strategy!)));
+
+        Assert.Contains("必须显式选择 direct", error.Message);
+        var unchanged = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal(proxy.Id, unchanged.ProxyId);
+        Assert.False(unchanged.UseGlobalProxy);
+        Assert.True(unchanged.IsActive);
+    }
+
+    [Fact]
+    public async Task 旧客户端无法确认断开时不会提交新代理绑定()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var oldProxy = NewProxy("strict-switch-old");
+        var targetProxy = NewProxy("strict-switch-target");
+        var account = NewAccount(oldProxy);
+        account.UseGlobalProxy = false;
+        account.IsActive = true;
+        db.AddRange(oldProxy, targetProxy, account);
+        await db.SaveChangesAsync();
+
+        var pool = new RecordingClientPool
+        {
+            StrictRemovalError = new InvalidOperationException("旧客户端仍可能在线")
+        };
+        var service = CreateProxyService(db, pool);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.BindAccountsAsync(
+                new[] { account.Id },
+                new AccountProxyBindingInput("existing", targetProxy.Id)));
+
+        Assert.Contains("旧客户端仍可能在线", error.Message);
+        var unchanged = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal(oldProxy.Id, unchanged.ProxyId);
+        Assert.False(unchanged.UseGlobalProxy);
+        Assert.False(unchanged.IsActive);
     }
 
     [Fact]
@@ -75,7 +152,9 @@ public sealed class ProxyLifecycleRegressionTests
         var services = new ServiceCollection();
         services.AddDbContext<AppDbContext>(builder => builder.UseSqlite(connection));
         await using var provider = services.BuildServiceProvider();
-        var resolver = new AccountProxyResolver(provider.GetRequiredService<IServiceScopeFactory>());
+        var resolver = new AccountProxyResolver(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            new ConfigurationBuilder().Build());
         var direct = await resolver.ResolveAsync(1);
 
         Assert.Null(direct.Proxy);
@@ -92,6 +171,94 @@ public sealed class ProxyLifecycleRegressionTests
         }
 
         await Assert.ThrowsAsync<InvalidOperationException>(() => resolver.ResolveAsync(1));
+    }
+
+    [Fact]
+    public async Task 全局代理解析会生成显式快照且缺失配置时闭锁()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using (var db = new AppDbContext(options))
+        {
+            await db.Database.EnsureCreatedAsync();
+            db.Accounts.Add(new Account
+            {
+                Phone = "8613800000998",
+                UserId = 998,
+                SessionPath = "sessions/global.session",
+                ApiId = 1,
+                ApiHash = "hash",
+                UseGlobalProxy = true
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var services = new ServiceCollection();
+        services.AddDbContext<AppDbContext>(builder => builder.UseSqlite(connection));
+        await using var provider = services.BuildServiceProvider();
+        var scopeFactory = provider.GetRequiredService<IServiceScopeFactory>();
+
+        var configuredResolver = new AccountProxyResolver(
+            scopeFactory,
+            GlobalProxyConfiguration());
+        var resolved = await configuredResolver.ResolveAsync(1);
+
+        Assert.NotNull(resolved.Proxy);
+        Assert.Equal("127.0.0.9", resolved.Proxy!.Host);
+        Assert.Equal(19080, resolved.Proxy.Port);
+        Assert.False(resolved.UseGlobalProxy);
+
+        var invalidIdError = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            configuredResolver.ResolveAsync(0));
+        Assert.Contains("未知账号", invalidIdError.Message);
+        var missingAccountError = await Assert.ThrowsAsync<KeyNotFoundException>(() =>
+            configuredResolver.ResolveAsync(999));
+        Assert.Contains("不存在", missingAccountError.Message);
+
+
+        var missingResolver = new AccountProxyResolver(
+            scopeFactory,
+            new ConfigurationBuilder().Build());
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            missingResolver.ResolveAsync(1));
+        Assert.Contains("阻止降级为直连", error.Message);
+    }
+
+    [Fact]
+    public async Task 未配置全局代理时绑定和出口检测都不会退回面板直连()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var account = NewAccount(NewProxy("global-fail-closed"));
+        account.Proxy = null;
+        account.UseGlobalProxy = false;
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+        var service = CreateProxyService(db, new RecordingClientPool());
+
+        var bindError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.BindAccountsAsync(
+                new[] { account.Id },
+                new AccountProxyBindingInput("global")));
+        Assert.Contains("阻止降级为直连", bindError.Message);
+        var unchanged = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.False(unchanged.UseGlobalProxy);
+        Assert.Null(unchanged.ProxyId);
+
+        account.UseGlobalProxy = true;
+        await db.SaveChangesAsync();
+        var probeError = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.ProbeAccountAsync(account.Id));
+        Assert.Contains("阻止降级为直连", probeError.Message);
     }
 
     [Fact]
@@ -130,8 +297,54 @@ public sealed class ProxyLifecycleRegressionTests
         Assert.Equal(new[] { account.Id }, pool.RemovedAccountIds);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task 删除和废号清理在旧客户端无法断开时保留绑定并停用账号(bool purge)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy($"strict-account-delete-{purge}");
+        var account = NewAccount(proxy);
+        account.IsActive = true;
+        db.OutboundProxies.Add(proxy);
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var pool = new RecordingClientPool
+        {
+            StrictRemovalError = new InvalidOperationException("旧客户端仍在线")
+        };
+        var proxyService = CreateProxyService(db, pool);
+        var accountService = new AccountManagementService(
+            new AccountRepository(db),
+            new ChannelRepository(db),
+            new GroupRepository(db),
+            pool,
+            new ConfigurationBuilder().Build(),
+            NullLogger<AccountManagementService>.Instance,
+            proxyService,
+            new SessionPathResolver(new ConfigurationBuilder().Build()));
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() => purge
+            ? accountService.PurgeAccountAsync(account.Id)
+            : accountService.DeleteAccountAsync(account.Id));
+
+        Assert.Contains("旧客户端仍在线", error.Message);
+        var preserved = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal(proxy.Id, preserved.ProxyId);
+        Assert.False(preserved.IsActive);
+        Assert.True(await db.OutboundProxies.AnyAsync(x => x.Id == proxy.Id));
+    }
+
     [Fact]
-    public async Task WARP清理失败时账号删除会恢复绑定并抛错()
+    public async Task WARP清理失败时账号删除会保留已解绑且停用的账号()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -164,17 +377,20 @@ public sealed class ProxyLifecycleRegressionTests
 
         Assert.Contains("WARP 资源清理失败", error.Message);
         var preserved = await db.Accounts.AsNoTracking().SingleAsync();
-        Assert.Equal(proxy.Id, preserved.ProxyId);
+        Assert.Null(preserved.ProxyId);
+        Assert.False(preserved.IsActive);
         Assert.True(preserved.UseGlobalProxy);
         Assert.True(await db.OutboundProxies.AnyAsync(x => x.Id == proxy.Id));
         Assert.False((await db.OutboundProxies.AsNoTracking().SingleAsync()).IsEnabled);
         var profile = await db.WarpProfiles.AsNoTracking().SingleAsync();
         Assert.Equal(proxy.WarpProfile!.ContainerName, profile.ContainerName);
         Assert.Equal(proxy.WarpProfile.VolumeName, profile.VolumeName);
+        Assert.Equal("deleting", profile.Status);
+        Assert.False(profile.DesiredEnabled);
     }
 
     [Fact]
-    public async Task WARP清理失败时代理切换会恢复原绑定和路由模式()
+    public async Task WARP清理失败时代理切换会保留已提交的新路由()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -202,13 +418,78 @@ public sealed class ProxyLifecycleRegressionTests
                 new AccountProxyBindingInput("existing", targetProxy.Id)));
 
         Assert.Contains("WARP 资源清理失败", error.Message);
-        var restored = await db.Accounts.AsNoTracking().SingleAsync();
-        Assert.Equal(warpProxy.Id, restored.ProxyId);
-        Assert.True(restored.UseGlobalProxy);
+        var switched = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal(targetProxy.Id, switched.ProxyId);
+        Assert.False(switched.UseGlobalProxy);
         Assert.True(await db.OutboundProxies.AnyAsync(x => x.Id == warpProxy.Id));
         Assert.False((await db.OutboundProxies.AsNoTracking()
             .SingleAsync(x => x.Id == warpProxy.Id)).IsEnabled);
-        Assert.True(await db.WarpProfiles.AnyAsync(x => x.OutboundProxyId == warpProxy.Id));
+        var profile = await db.WarpProfiles.AsNoTracking()
+            .SingleAsync(x => x.OutboundProxyId == warpProxy.Id);
+        Assert.Equal("deleting", profile.Status);
+        Assert.False(profile.DesiredEnabled);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task 删除和废号清理会持有代理变更锁直到账号记录删除(bool purge)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var oldProxy = NewProxy($"delete-race-old-{purge}");
+        var targetProxy = NewProxy($"delete-race-target-{purge}");
+        targetProxy.Port = 8090;
+        var account = NewAccount(oldProxy);
+        account.SessionPath = Path.Combine(
+            Path.GetTempPath(),
+            $"telegram-panel-delete-race-{Guid.NewGuid():N}.session");
+        db.AddRange(account, targetProxy);
+        await db.SaveChangesAsync();
+
+        var repository = new BlockingDeleteAccountRepository(db);
+        var pool = new RecordingClientPool();
+        var proxyService = CreateProxyService(db, pool);
+        var accountService = new AccountManagementService(
+            repository,
+            new ChannelRepository(db),
+            new GroupRepository(db),
+            pool,
+            new ConfigurationBuilder().Build(),
+            NullLogger<AccountManagementService>.Instance,
+            proxyService,
+            new SessionPathResolver(new ConfigurationBuilder().Build()));
+
+        var deleteTask = purge
+            ? accountService.PurgeAccountAsync(account.Id)
+            : accountService.DeleteAccountAsync(account.Id);
+        await repository.DeleteStarted.WaitAsync(TimeSpan.FromSeconds(10));
+
+        var bindTask = proxyService.BindAccountsAsync(
+            new[] { account.Id },
+            new AccountProxyBindingInput("existing", targetProxy.Id));
+        try
+        {
+            Assert.False(bindTask.IsCompleted);
+        }
+        finally
+        {
+            repository.AllowDelete();
+        }
+
+        await deleteTask.WaitAsync(TimeSpan.FromSeconds(10));
+        var bindResult = await bindTask.WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Empty(await db.Accounts.AsNoTracking().ToListAsync());
+        Assert.Equal(0, bindResult.Success);
+        Assert.Equal(1, bindResult.Failed);
+        Assert.Equal("账号不存在", bindResult.Items.Single().Summary);
     }
 
     [Fact]
@@ -253,6 +534,134 @@ public sealed class ProxyLifecycleRegressionTests
         Assert.Null(updated.LastLatencyMs);
         Assert.Null(updated.LastTestedAtUtc);
     }
+
+    [Fact]
+    public async Task 普通代理不能通过编辑伪装成受管WARP()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy("managed-warp-update-guard");
+        db.OutboundProxies.Add(proxy);
+        await db.SaveChangesAsync();
+        var service = CreateProxyService(db, new RecordingClientPool());
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.UpdateAsync(
+                proxy.Id,
+                NewInput(
+                    name: proxy.Name,
+                    kind: OutboundProxyKinds.Warp,
+                    protocol: OutboundProxyProtocols.Http,
+                    host: proxy.Host,
+                    port: proxy.Port)));
+
+        Assert.Contains("一键创建", error.Message);
+        var unchanged = await db.OutboundProxies.AsNoTracking().SingleAsync();
+        Assert.Equal(OutboundProxyKinds.Manual, unchanged.Kind);
+        Assert.Empty(await db.WarpProfiles.AsNoTracking().ToListAsync());
+    }
+
+    [Fact]
+    public async Task 代理连接参数编辑前旧客户端无法断开则保留旧配置()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy("strict-proxy-update");
+        var originalHost = proxy.Host;
+        var account = NewAccount(proxy);
+        account.IsActive = true;
+        db.OutboundProxies.Add(proxy);
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var pool = new RecordingClientPool
+        {
+            StrictRemovalError = new InvalidOperationException("旧客户端仍在线")
+        };
+        var service = CreateProxyService(db, pool);
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.UpdateAsync(
+                proxy.Id,
+                NewInput(
+                    name: proxy.Name,
+                    kind: OutboundProxyKinds.Manual,
+                    protocol: OutboundProxyProtocols.Http,
+                    host: "new-proxy.example",
+                    port: proxy.Port)));
+
+        Assert.Contains("旧客户端仍在线", error.Message);
+        var unchangedProxy = await db.OutboundProxies.AsNoTracking().SingleAsync();
+        Assert.Equal(originalHost, unchangedProxy.Host);
+        var unchangedAccount = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal(proxy.Id, unchangedAccount.ProxyId);
+        Assert.False(unchangedAccount.IsActive);
+    }
+    [Fact]
+    public async Task 代理连接参数编辑时先停用账号并在新配置提交时恢复()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy("proxy-update-quiesce");
+        var originalHost = proxy.Host;
+        var account = NewAccount(proxy);
+        account.IsActive = true;
+        db.OutboundProxies.Add(proxy);
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var strictRemovalObserved = false;
+        var pool = new RecordingClientPool
+        {
+            OnStrictRemoveAsync = async accountId =>
+            {
+                var storedAccount = await db.Accounts
+                    .AsNoTracking()
+                    .SingleAsync(x => x.Id == accountId);
+                var storedProxy = await db.OutboundProxies
+                    .AsNoTracking()
+                    .SingleAsync(x => x.Id == proxy.Id);
+                Assert.False(storedAccount.IsActive);
+                Assert.Equal(originalHost, storedProxy.Host);
+                strictRemovalObserved = true;
+            }
+        };
+        var service = CreateProxyService(db, pool);
+
+        await service.UpdateAsync(
+            proxy.Id,
+            NewInput(
+                name: proxy.Name,
+                kind: OutboundProxyKinds.Manual,
+                protocol: OutboundProxyProtocols.Http,
+                host: "new-proxy.example",
+                port: proxy.Port));
+
+        Assert.True(strictRemovalObserved);
+        var updatedProxy = await db.OutboundProxies.AsNoTracking().SingleAsync();
+        var restoredAccount = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Equal("new-proxy.example", updatedProxy.Host);
+        Assert.True(restoredAccount.IsActive);
+    }
+
 
     [Fact]
     public async Task 停用的账号代理出口检测不会降级为面板直连()
@@ -310,6 +719,49 @@ public sealed class ProxyLifecycleRegressionTests
     }
 
     [Fact]
+    public async Task 编辑代理时密码留空不会误判连接变化或断开客户端()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+
+        var proxy = NewProxy("blank-password");
+        proxy.Password = "existing-password";
+        var account = NewAccount(proxy);
+        db.OutboundProxies.Add(proxy);
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var pool = new RecordingClientPool
+        {
+            StrictRemovalError = new InvalidOperationException("不应断开客户端")
+        };
+        var service = CreateProxyService(db, pool);
+
+        await service.UpdateAsync(
+            proxy.Id,
+            NewInput(
+                name: proxy.Name,
+                kind: proxy.Kind,
+                protocol: proxy.Protocol,
+                host: proxy.Host,
+                port: proxy.Port) with
+            {
+                Password = "   "
+            });
+
+        Assert.Equal(
+            "existing-password",
+            (await db.OutboundProxies.AsNoTracking().SingleAsync()).Password);
+        Assert.Empty(pool.RemovedAccountIds);
+        Assert.True((await db.Accounts.AsNoTracking().SingleAsync()).IsActive);
+    }
+
+    [Fact]
     public async Task 留空时保留适用凭据但切出协议后清除Secret()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -351,7 +803,7 @@ public sealed class ProxyLifecycleRegressionTests
     }
 
     [Fact]
-    public async Task WARP停用会释放所有绑定账号客户端并同步DesiredEnabled()
+    public async Task WARP启停会真实控制容器并同步数据库状态()
     {
         await using var connection = new SqliteConnection("Data Source=:memory:");
         await connection.OpenAsync();
@@ -361,13 +813,14 @@ public sealed class ProxyLifecycleRegressionTests
         await using var db = new AppDbContext(options);
         await db.Database.EnsureCreatedAsync();
 
-        var proxy = NewProxy("warp-disable");
+        var proxy = NewProxy("warp-toggle");
         proxy.Kind = OutboundProxyKinds.Warp;
         var profile = new WarpProfile
         {
-            ProfileId = "profile-warp-disable",
-            ContainerName = "warp-disable",
-            VolumeName = "warp-disable-data",
+            ProfileId = "profile-warp-toggle",
+            ContainerId = "warp-toggle-id",
+            ContainerName = "warp-toggle",
+            VolumeName = "warp-toggle-data",
             HostPort = 42101,
             Status = "active",
             DesiredEnabled = true,
@@ -378,8 +831,21 @@ public sealed class ProxyLifecycleRegressionTests
         db.Accounts.Add(account);
         await db.SaveChangesAsync();
 
+        var docker = new WarpLifecycleRegressionTests.FakeWarpDockerClient();
+        docker.SeedResources(
+            profile.ProfileId,
+            profile.ContainerName,
+            profile.VolumeName,
+            profile.ContainerId!);
         var pool = new RecordingClientPool();
-        var service = CreateProxyService(db, pool);
+        var probe = new ProxyEgressProbeService();
+        var service = new ProxyManagementService(
+            db,
+            pool,
+            probe,
+            WarpLifecycleRegressionTests.CreateManager(db, docker, enabled: true),
+            NullLogger<ProxyManagementService>.Instance);
+
         await service.UpdateAsync(
             proxy.Id,
             NewInput(
@@ -391,8 +857,47 @@ public sealed class ProxyLifecycleRegressionTests
                 isEnabled: false));
 
         Assert.Contains(account.Id, pool.RemovedAccountIds);
-        Assert.False((await db.WarpProfiles.AsNoTracking().SingleAsync()).DesiredEnabled);
+        Assert.Contains(profile.ContainerId!, docker.StoppedContainerReferences);
+        var stoppedProfile = await db.WarpProfiles.AsNoTracking().SingleAsync();
+        Assert.False(stoppedProfile.DesiredEnabled);
+        Assert.Equal("stopped", stoppedProfile.Status);
         Assert.False((await db.OutboundProxies.AsNoTracking().SingleAsync()).IsEnabled);
+        Assert.False((await db.Accounts.AsNoTracking().SingleAsync()).IsActive);
+
+        // 兼容旧版本：数据库开关已经停用，但 Profile 仍标记 active，
+        // 再次保存“停用”也必须补做真实容器停止。
+        docker.StoppedContainerReferences.Clear();
+        profile.Status = "active";
+        await db.SaveChangesAsync();
+        await service.UpdateAsync(
+            proxy.Id,
+            NewInput(
+                name: proxy.Name,
+                kind: OutboundProxyKinds.Warp,
+                protocol: OutboundProxyProtocols.Http,
+                host: proxy.Host,
+                port: proxy.Port,
+                isEnabled: false));
+        Assert.Contains(profile.ContainerId!, docker.StoppedContainerReferences);
+        Assert.Equal(
+            "stopped",
+            (await db.WarpProfiles.AsNoTracking().SingleAsync()).Status);
+
+        await service.UpdateAsync(
+            proxy.Id,
+            NewInput(
+                name: proxy.Name,
+                kind: OutboundProxyKinds.Warp,
+                protocol: OutboundProxyProtocols.Http,
+                host: proxy.Host,
+                port: proxy.Port,
+                isEnabled: true));
+
+        Assert.Contains(profile.ContainerId!, docker.StartedContainerReferences);
+        var activeProfile = await db.WarpProfiles.AsNoTracking().SingleAsync();
+        Assert.True(activeProfile.DesiredEnabled);
+        Assert.Equal("active", activeProfile.Status);
+        Assert.True((await db.OutboundProxies.AsNoTracking().SingleAsync()).IsEnabled);
     }
 
     [Fact]
@@ -439,6 +944,41 @@ public sealed class ProxyLifecycleRegressionTests
         finally
         {
             pool.Dispose();
+            TryDelete(sessionPath);
+        }
+    }
+
+    [Fact]
+    public async Task 客户端池收到全局模式但配置缺失时会在构造客户端前闭锁()
+    {
+        var resolver = new FixedProxyResolver(new AccountProxyResolution(null, true));
+        using var pool = new TelegramClientPool(
+            new ConfigurationBuilder().Build(),
+            NullLogger<TelegramClientPool>.Instance,
+            new TelegramAccountUpdateHub(),
+            resolver,
+            new SessionPathResolver(new ConfigurationBuilder().Build()));
+        var sessionPath = Path.Combine(
+            Path.GetTempPath(),
+            $"telegram-panel-global-fail-closed-{Guid.NewGuid():N}.session");
+
+        try
+        {
+            var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                pool.GetOrCreateClientAsync(
+                    9003,
+                    12345,
+                    "0123456789abcdef0123456789abcdef",
+                    sessionPath,
+                    sessionKey: "0123456789abcdef0123456789abcdef",
+                    phoneNumber: "8613800000002"));
+
+            Assert.Contains("阻止降级为直连", error.Message);
+            Assert.Null(pool.GetClient(9003));
+            Assert.False(File.Exists(sessionPath));
+        }
+        finally
+        {
             TryDelete(sessionPath);
         }
     }
@@ -516,6 +1056,17 @@ public sealed class ProxyLifecycleRegressionTests
                 ["Proxy:Warp:DockerSocketPath"] = Path.Combine(
                     Path.GetTempPath(),
                     $"telegram-panel-missing-docker-{Guid.NewGuid():N}.sock")
+            })
+            .Build();
+
+    private static IConfiguration GlobalProxyConfiguration() =>
+        new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Telegram:Proxy:Server"] = "127.0.0.9",
+                ["Telegram:Proxy:Port"] = "19080",
+                ["Telegram:Proxy:Username"] = "global-user",
+                ["Telegram:Proxy:Password"] = "global-password"
             })
             .Build();
 
@@ -599,6 +1150,8 @@ public sealed class ProxyLifecycleRegressionTests
         private readonly List<int> _removed = new();
 
         public IReadOnlyList<int> RemovedAccountIds => _removed;
+        public Exception? StrictRemovalError { get; init; }
+        public Func<int, Task>? OnStrictRemoveAsync { get; init; }
         public int ActiveClientCount => 0;
 
         public Task<Client> GetOrCreateClientAsync(
@@ -620,9 +1173,41 @@ public sealed class ProxyLifecycleRegressionTests
             return Task.CompletedTask;
         }
 
+        public async Task RemoveClientStrictAsync(int accountId)
+        {
+            if (OnStrictRemoveAsync != null)
+                await OnStrictRemoveAsync(accountId);
+            if (StrictRemovalError != null)
+                throw StrictRemovalError;
+            await RemoveClientAsync(accountId);
+        }
+
         public Task RemoveAllClientsAsync() => Task.CompletedTask;
 
         public bool IsClientConnected(int accountId) => false;
+    }
+
+    private sealed class BlockingDeleteAccountRepository : AccountRepository
+    {
+        private readonly TaskCompletionSource _deleteStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _allowDelete =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public BlockingDeleteAccountRepository(AppDbContext context) : base(context)
+        {
+        }
+
+        public Task DeleteStarted => _deleteStarted.Task;
+
+        public void AllowDelete() => _allowDelete.TrySetResult();
+
+        public override async Task DeleteAsync(Account entity)
+        {
+            _deleteStarted.TrySetResult();
+            await _allowDelete.Task;
+            await base.DeleteAsync(entity);
+        }
     }
 
     private sealed class BlockingProxyResolver : IAccountProxyResolver
@@ -644,6 +1229,24 @@ public sealed class ProxyLifecycleRegressionTests
         {
             await _release.Task.WaitAsync(cancellationToken);
             return new AccountProxyResolution(null, true);
+        }
+    }
+
+    private sealed class FixedProxyResolver : IAccountProxyResolver
+    {
+        private readonly AccountProxyResolution _resolution;
+
+        public FixedProxyResolver(AccountProxyResolution resolution)
+        {
+            _resolution = resolution;
+        }
+
+        public Task<AccountProxyResolution> ResolveAsync(
+            int accountId,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(_resolution);
         }
     }
 }

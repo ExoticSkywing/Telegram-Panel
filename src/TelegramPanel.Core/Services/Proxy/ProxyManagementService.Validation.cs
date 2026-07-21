@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using TelegramPanel.Core.Models;
 using TelegramPanel.Data.Entities;
@@ -6,6 +7,8 @@ namespace TelegramPanel.Core.Services.Proxy;
 
 public sealed partial class ProxyManagementService
 {
+    private const string ResinPlatformForbiddenChars = ".:|/\\@?#%~";
+
     private async Task EnsureNoDuplicateAsync(
         OutboundProxyInput input,
         int? exceptId,
@@ -54,8 +57,14 @@ public sealed partial class ProxyManagementService
         if (kind == OutboundProxyKinds.Resin)
         {
             resinPlatform ??= "Default";
-            if (resinPlatform.Any(ch => !char.IsLetterOrDigit(ch) && ch is not '-' and not '_'))
-                throw new ArgumentException("Resin Platform 仅允许字母、数字、横线和下划线");
+            if (string.Equals(resinPlatform, "api", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Resin Platform 不能使用保留名称 api");
+            if (resinPlatform.IndexOfAny(ResinPlatformForbiddenChars.ToCharArray()) >= 0
+                || resinPlatform.Any(char.IsWhiteSpace))
+            {
+                throw new ArgumentException(
+                    $"Resin Platform 不能包含空白或以下字符：{ResinPlatformForbiddenChars}");
+            }
         }
         else
         {
@@ -65,6 +74,16 @@ public sealed partial class ProxyManagementService
         var adminUrl = kind == OutboundProxyKinds.Resin
             ? NormalizeAdminUrl(input.ResinAdminUrl ?? existing?.ResinAdminUrl)
             : null;
+        var password = input.ClearPassword
+            ? null
+            : NormalizeOptional(
+                PreserveSensitiveValue(input.Password, existing?.Password),
+                500);
+        if (kind == OutboundProxyKinds.Resin
+            && protocol == OutboundProxyProtocols.Socks5)
+        {
+            ValidateResinSocks5Credentials(resinPlatform!, password);
+        }
         var secret = protocol == OutboundProxyProtocols.MtProto
             ? NormalizeOptional(PreserveSensitiveValue(input.Secret, existing?.Secret), 500)
             : null;
@@ -72,9 +91,11 @@ public sealed partial class ProxyManagementService
             throw new ArgumentException("MTProxy 必须填写 Secret");
 
         var resinAdminToken = kind == OutboundProxyKinds.Resin
-            ? NormalizeOptional(
-                PreserveSensitiveValue(input.ResinAdminToken, existing?.ResinAdminToken),
-                500)
+            ? input.ClearResinAdminToken
+                ? null
+                : NormalizeOptional(
+                    PreserveSensitiveValue(input.ResinAdminToken, existing?.ResinAdminToken),
+                    500)
             : null;
 
         return input with
@@ -85,12 +106,30 @@ public sealed partial class ProxyManagementService
             Host = host,
             Port = port,
             Username = NormalizeOptional(input.Username ?? existing?.Username, 255),
-            Password = NormalizeOptional(input.Password ?? existing?.Password, 500),
+            Password = password,
             Secret = secret,
             ResinPlatform = resinPlatform,
             ResinAdminUrl = adminUrl,
             ResinAdminToken = resinAdminToken
         };
+    }
+
+    private static void ValidateResinSocks5Credentials(
+        string platform,
+        string? proxyToken)
+    {
+        const int socks5FieldByteLimit = 255;
+        const string longestGeneratedAccountKey = "tg_import_000000000000000000000000";
+        var usernameBytes = Encoding.UTF8.GetByteCount(
+            $"{platform}.{longestGeneratedAccountKey}");
+        if (usernameBytes > socks5FieldByteLimit)
+        {
+            throw new ArgumentException(
+                "Resin Platform 过长，SOCKS5 动态账号用户名不能超过 255 字节");
+        }
+
+        if (Encoding.UTF8.GetByteCount(proxyToken ?? string.Empty) > socks5FieldByteLimit)
+            throw new ArgumentException("Resin Proxy Token 的 UTF-8 长度不能超过 255 字节");
     }
 
     private static string? PreserveSensitiveValue(string? incoming, string? existing) =>
@@ -126,6 +165,7 @@ public sealed partial class ProxyManagementService
         if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
             || uri.Scheme is not ("http" or "https")
             || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
             || !string.IsNullOrEmpty(uri.Fragment))
         {
             throw new ArgumentException("Resin 管理地址必须是有效的 HTTP(S) URL");
@@ -145,7 +185,10 @@ public sealed partial class ProxyManagementService
 
     private static string NormalizeStrategy(string? strategy)
     {
-        strategy = (strategy ?? "direct").Trim().ToLowerInvariant();
+        strategy = (strategy ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(strategy))
+            throw new ArgumentException("请明确选择代理策略；如需直连必须显式选择 direct");
+
         return strategy switch
         {
             "direct" or "global" or "existing" or "warp_per_account" => strategy,
@@ -175,7 +218,8 @@ public sealed partial class ProxyManagementService
             || string.IsNullOrWhiteSpace(uri.Host)
             || uri.Port is < 1 or > 65535)
         {
-            throw new ArgumentException($"代理地址格式无效：{line}");
+            // 原始行可能包含代理用户名、密码或 Token，禁止把它拼进异常并返回前端。
+            throw new ArgumentException("代理地址格式无效，请检查协议、主机和端口");
         }
 
         var protocol = uri.Scheme.ToLowerInvariant() switch

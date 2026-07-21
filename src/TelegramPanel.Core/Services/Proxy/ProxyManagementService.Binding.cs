@@ -7,6 +7,13 @@ namespace TelegramPanel.Core.Services.Proxy;
 
 public sealed partial class ProxyManagementService
 {
+    internal async ValueTask<MutationLease> AcquireMutationLeaseAsync(
+        CancellationToken cancellationToken = default)
+    {
+        await MutationLock.WaitAsync(cancellationToken);
+        return new MutationLease(this);
+    }
+
     /// <summary>
     /// 解除账号的代理绑定，并回收不再使用的账号专属代理资源。
     /// </summary>
@@ -18,66 +25,86 @@ public sealed partial class ProxyManagementService
         if (accountId <= 0)
             return;
 
-        await MutationLock.WaitAsync(cancellationToken);
+        await using var lease = await AcquireMutationLeaseAsync(cancellationToken);
+        await ReleaseAccountBindingWithinMutationAsync(
+            lease,
+            accountId,
+            expectedProxyId,
+            deactivateAccount: false,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 在调用方已持有代理变更锁时解除绑定。锁租约会阻止误用和重复加锁。
+    /// </summary>
+    internal async Task ReleaseAccountBindingWithinMutationAsync(
+        MutationLease lease,
+        int accountId,
+        int? expectedProxyId,
+        bool deactivateAccount,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        lease.EnsureHeldBy(this);
+        if (accountId <= 0)
+            return;
+
+        var account = await _db.Accounts
+            .FirstOrDefaultAsync(x => x.Id == accountId, cancellationToken);
+        if (account == null)
+        {
+            await ReleaseClientsStrictAsync(new[] { accountId });
+            return;
+        }
+
+        var currentProxyId = account.ProxyId ?? 0;
+        if (expectedProxyId.HasValue && currentProxyId != expectedProxyId.Value)
+            throw new ProxyBindingConflictException("账号代理绑定已变化，未执行删除清理");
+
+        if (deactivateAccount && account.IsActive)
+        {
+            account.IsActive = false;
+            await _db.SaveChangesAsync(cancellationToken);
+        }
+
+        // 只有确认旧客户端已断开后，才允许解除绑定或回收独立代理资源。
+        await ReleaseClientsStrictAsync(new[] { accountId });
+
+        OutboundProxy? oldProxy = null;
+        if (account.ProxyId.HasValue)
+        {
+            oldProxy = await _db.OutboundProxies
+                .Include(x => x.WarpProfile)
+                .FirstOrDefaultAsync(x => x.Id == account.ProxyId.Value, cancellationToken);
+
+            if (oldProxy?.Kind == OutboundProxyKinds.Resin)
+            {
+                await ReleaseResinLeaseAsync(oldProxy, accountId, cancellationToken);
+            }
+
+            account.ProxyId = null;
+            account.Proxy = null;
+        }
+
+        if (oldProxy != null)
+            await _db.SaveChangesAsync(cancellationToken);
+
+        if (oldProxy?.Kind != OutboundProxyKinds.Warp)
+            return;
+
         try
         {
-            var account = await _db.Accounts
-                .FirstOrDefaultAsync(x => x.Id == accountId, cancellationToken);
-            if (account == null)
-            {
-                await ReleaseClientsAsync(new[] { accountId });
-                return;
-            }
-
-            var currentProxyId = account.ProxyId ?? 0;
-            if (expectedProxyId.HasValue && currentProxyId != expectedProxyId.Value)
-                throw new ProxyBindingConflictException("账号代理绑定已变化，未执行删除清理");
-
-            OutboundProxy? oldProxy = null;
-            var oldUseGlobalProxy = account.UseGlobalProxy;
-            if (account.ProxyId.HasValue)
-            {
-                oldProxy = await _db.OutboundProxies
-                    .Include(x => x.WarpProfile)
-                    .FirstOrDefaultAsync(x => x.Id == account.ProxyId.Value, cancellationToken);
-
-                if (oldProxy?.Kind == OutboundProxyKinds.Resin)
-                {
-                    await ReleaseClientsAsync(new[] { accountId });
-                    await ReleaseResinLeaseAsync(oldProxy, accountId, cancellationToken);
-                }
-
-                account.ProxyId = null;
-                account.Proxy = null;
-                await _db.SaveChangesAsync(cancellationToken);
-            }
-
-            if (oldProxy?.Kind != OutboundProxyKinds.Resin)
-                await ReleaseClientsAsync(new[] { accountId });
-
-            if (oldProxy?.Kind == OutboundProxyKinds.Warp)
-            {
-                try
-                {
-                    await CleanupReplacedWarpProxiesAsync(
-                        new[] { oldProxy.Id },
-                        targetProxyId: null,
-                        cancellationToken);
-                }
-                catch (Exception cleanupError)
-                {
-                    await RestoreAccountWarpBindingAsync(
-                        account,
-                        oldProxy,
-                        oldUseGlobalProxy,
-                        cleanupError);
-                    throw;
-                }
-            }
+            await CleanupReplacedWarpProxiesAsync(
+                new[] { oldProxy.Id },
+                targetProxyId: null,
+                cancellationToken);
         }
-        finally
+        catch (Exception cleanupError)
         {
-            MutationLock.Release();
+            var message = deactivateAccount
+                ? "WARP 资源清理失败，账号已解除代理绑定并停用，可重试删除旧 WARP"
+                : "WARP 资源清理失败，账号已解除旧代理绑定，可重试删除旧 WARP";
+            throw new InvalidOperationException(message, cleanupError);
         }
     }
 
@@ -93,6 +120,8 @@ public sealed partial class ProxyManagementService
             throw new ArgumentException("单次最多处理 500 个账号");
 
         var strategy = NormalizeStrategy(input.Strategy);
+        if (strategy == "global")
+            _ = RequireGlobalProxy();
         if (strategy == "warp_per_account" && ids.Length > 10)
             throw new ArgumentException("逐账号创建 WARP 单次最多处理 10 个账号");
 
@@ -162,14 +191,23 @@ public sealed partial class ProxyManagementService
 
             var oldBindings = accounts
                 .Where(x => x.ProxyId.HasValue && x.Proxy != null)
-                .Select(x => new PreviousProxyBinding(x.Id, x.Proxy!, x.UseGlobalProxy))
+                .Select(x => new PreviousProxyBinding(x.Id, x.Proxy!))
                 .ToList();
+
+            var activationStates = accounts.ToDictionary(x => x.Id, x => x.IsActive);
+            foreach (var account in accounts)
+                account.IsActive = false;
+            if (activationStates.Values.Any(x => x))
+                await _db.SaveChangesAsync(cancellationToken);
+
+            // 提交新路由前必须确认旧客户端已经断开。否则数据库虽然显示已切换，
+            // 内存中的已登录客户端仍可能继续使用旧出口，造成“伪切换”。
+            await ReleaseClientsStrictAsync(accounts.Select(x => x.Id));
 
             var resinBindings = oldBindings
                 .Where(x => x.Proxy.Kind == OutboundProxyKinds.Resin
                             && x.Proxy.Id != targetProxyId)
                 .ToList();
-            await ReleaseClientsAsync(resinBindings.Select(x => x.AccountId));
             foreach (var old in resinBindings)
                 await ReleaseResinLeaseAsync(old.Proxy, old.AccountId, cancellationToken);
 
@@ -178,6 +216,7 @@ public sealed partial class ProxyManagementService
             {
                 account.ProxyId = targetProxyId;
                 account.UseGlobalProxy = useGlobalProxy;
+                account.IsActive = activationStates[account.Id];
             }
             if (targetProxy != null && targetProxy.FirstBoundAtUtc == null)
                 targetProxy.FirstBoundAtUtc = DateTime.UtcNow;
@@ -205,7 +244,6 @@ public sealed partial class ProxyManagementService
                     "账号不存在"));
             }
 
-            await ReleaseClientsAsync(accounts.Select(x => x.Id));
             try
             {
                 await CleanupReplacedWarpProxiesAsync(
@@ -215,11 +253,10 @@ public sealed partial class ProxyManagementService
             }
             catch (Exception cleanupError)
             {
-                await RestoreSurvivingWarpBindingsAsync(
-                    accounts,
-                    oldBindings,
+                // 新路由已经提交，不能再把账号指回已停用或已部分删除的旧 WARP。
+                throw new InvalidOperationException(
+                    "代理切换已提交，但旧 WARP 资源清理失败，请重试删除旧 WARP",
                     cleanupError);
-                throw;
             }
 
             return ToBatchResult(results);
@@ -235,7 +272,11 @@ public sealed partial class ProxyManagementService
         CancellationToken cancellationToken = default)
     {
         var strategy = NormalizeStrategy(input.Strategy);
-        if (strategy == "existing")
+        if (strategy == "global")
+        {
+            _ = RequireGlobalProxy();
+        }
+        else if (strategy == "existing")
         {
             if (input.ProxyId is not > 0)
                 throw new ArgumentException("请选择已有代理");
@@ -326,95 +367,6 @@ public sealed partial class ProxyManagementService
         }
     }
 
-    private async Task RestoreAccountWarpBindingAsync(
-        Account account,
-        OutboundProxy oldProxy,
-        bool oldUseGlobalProxy,
-        Exception cleanupError)
-    {
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            RestoreDeletedProxyEntry(oldProxy);
-            var proxyStillExists = await _db.OutboundProxies
-                .AsNoTracking()
-                .AnyAsync(x => x.Id == oldProxy.Id, timeout.Token);
-            if (!proxyStillExists)
-                throw new InvalidOperationException("旧 WARP 代理记录已不存在，无法恢复账号绑定");
-
-            account.ProxyId = oldProxy.Id;
-            account.Proxy = oldProxy;
-            account.UseGlobalProxy = oldUseGlobalProxy;
-            await _db.SaveChangesAsync(timeout.Token);
-        }
-        catch (Exception restoreError)
-        {
-            throw new InvalidOperationException(
-                "WARP 资源清理失败，且账号代理绑定恢复失败，请检查 WARP 代理记录后重试",
-                new AggregateException(cleanupError, restoreError));
-        }
-
-        throw new InvalidOperationException(
-            "WARP 资源清理失败，账号代理绑定已恢复且代理已停用，请重试删除或切换操作",
-            cleanupError);
-    }
-
-    private async Task RestoreSurvivingWarpBindingsAsync(
-        IReadOnlyCollection<Account> accounts,
-        IReadOnlyCollection<PreviousProxyBinding> oldBindings,
-        Exception cleanupError)
-    {
-        try
-        {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            var candidates = oldBindings
-                .Where(x => x.Proxy.Kind == OutboundProxyKinds.Warp)
-                .ToList();
-            foreach (var candidate in candidates)
-                RestoreDeletedProxyEntry(candidate.Proxy);
-
-            var candidateIds = candidates.Select(x => x.Proxy.Id).Distinct().ToArray();
-            var survivingIds = (await _db.OutboundProxies
-                .AsNoTracking()
-                .Where(x => candidateIds.Contains(x.Id))
-                .Select(x => x.Id)
-                .ToListAsync(timeout.Token))
-                .ToHashSet();
-
-            foreach (var previous in candidates.Where(x => survivingIds.Contains(x.Proxy.Id)))
-            {
-                var account = accounts.First(x => x.Id == previous.AccountId);
-                account.ProxyId = previous.Proxy.Id;
-                account.Proxy = previous.Proxy;
-                account.UseGlobalProxy = previous.UseGlobalProxy;
-            }
-            await _db.SaveChangesAsync(timeout.Token);
-        }
-        catch (Exception restoreError)
-        {
-            throw new InvalidOperationException(
-                "WARP 资源清理失败，且部分账号代理绑定恢复失败，请检查 WARP 代理记录后重试",
-                new AggregateException(cleanupError, restoreError));
-        }
-
-        throw new InvalidOperationException(
-            "WARP 资源清理失败，仍有资源的账号已恢复原代理绑定且代理已停用，请重试切换操作",
-            cleanupError);
-    }
-
-    private void RestoreDeletedProxyEntry(OutboundProxy proxy)
-    {
-        var proxyEntry = _db.Entry(proxy);
-        if (proxyEntry.State == EntityState.Deleted)
-            proxyEntry.State = EntityState.Unchanged;
-        if (proxy.WarpProfile != null)
-        {
-            var profileEntry = _db.Entry(proxy.WarpProfile);
-            if (profileEntry.State == EntityState.Deleted)
-                profileEntry.State = EntityState.Unchanged;
-        }
-    }
-
     private async Task ReleaseClientsAsync(IEnumerable<int> accountIds)
     {
         foreach (var accountId in accountIds.Distinct())
@@ -433,7 +385,7 @@ public sealed partial class ProxyManagementService
     private async Task ReleaseClientsStrictAsync(IEnumerable<int> accountIds)
     {
         foreach (var accountId in accountIds.Distinct())
-            await _clientPool.RemoveClientAsync(accountId);
+            await _clientPool.RemoveClientStrictAsync(accountId);
     }
 
     private static AccountProxyBatchResult ToBatchResult(
@@ -445,6 +397,28 @@ public sealed partial class ProxyManagementService
 
     private sealed record PreviousProxyBinding(
         int AccountId,
-        OutboundProxy Proxy,
-        bool UseGlobalProxy);
+        OutboundProxy Proxy);
+
+    internal sealed class MutationLease : IAsyncDisposable
+    {
+        private ProxyManagementService? _owner;
+
+        internal MutationLease(ProxyManagementService owner)
+        {
+            _owner = owner;
+        }
+
+        internal void EnsureHeldBy(ProxyManagementService owner)
+        {
+            if (!ReferenceEquals(Volatile.Read(ref _owner), owner))
+                throw new InvalidOperationException("代理变更锁租约无效或已释放");
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _owner, null) != null)
+                MutationLock.Release();
+            return ValueTask.CompletedTask;
+        }
+    }
 }

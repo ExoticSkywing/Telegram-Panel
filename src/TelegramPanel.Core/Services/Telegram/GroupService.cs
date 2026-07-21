@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Models;
 using TelegramPanel.Core.Services;
+using TelegramPanel.Core.Services.Proxy;
 using TL;
 using WTelegram;
 
@@ -17,6 +18,7 @@ public class GroupService : IGroupService
     private readonly ITelegramClientPool _clientPool;
     private readonly AccountManagementService _accountManagement;
     private readonly IConfiguration _configuration;
+    private readonly IAccountProxyResolver _proxyResolver;
     private readonly ILogger<GroupService> _logger;
     private readonly ISessionPathResolver _sessionPathResolver;
 
@@ -24,12 +26,14 @@ public class GroupService : IGroupService
         ITelegramClientPool clientPool,
         AccountManagementService accountManagement,
         IConfiguration configuration,
+        IAccountProxyResolver proxyResolver,
         ILogger<GroupService> logger,
         ISessionPathResolver sessionPathResolver)
     {
         _clientPool = clientPool;
         _accountManagement = accountManagement;
         _configuration = configuration;
+        _proxyResolver = proxyResolver;
         _logger = logger;
         _sessionPathResolver = sessionPathResolver;
     }
@@ -1124,14 +1128,24 @@ public class GroupService : IGroupService
             throw new InvalidOperationException("账号缺少 SessionPath，无法创建 Telegram 客户端");
 
         var absoluteSessionPath = _sessionPathResolver.Resolve(account.SessionPath);
+        // 先释放可能仍会保存旧 Session 的客户端，避免其在转换完成后覆盖新文件。
+        await _clientPool.RemoveClientAsync(accountId);
         if (System.IO.File.Exists(absoluteSessionPath) && LooksLikeSqliteSession(absoluteSessionPath))
         {
+            var proxyResolution = await _proxyResolver.ResolveAsync(accountId, cancellationToken);
+            var proxy = proxyResolution.Proxy
+                ?? (proxyResolution.UseGlobalProxy
+                    ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                    : null);
+
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(
                 phone: account.Phone,
-                apiId: account.ApiId,
-                apiHash: account.ApiHash,
+                apiId: apiId,
+                apiHash: apiHash,
                 sqliteSessionPath: absoluteSessionPath,
-                logger: _logger
+                logger: _logger,
+                proxy: proxy,
+                cancellationToken: cancellationToken
             );
 
             if (!converted.Ok)
@@ -1143,7 +1157,6 @@ public class GroupService : IGroupService
             }
         }
 
-        await _clientPool.RemoveClientAsync(accountId);
         var client = await _clientPool.GetOrCreateClientAsync(accountId, apiId, apiHash, absoluteSessionPath, sessionKey, account.Phone, account.UserId);
 
         try

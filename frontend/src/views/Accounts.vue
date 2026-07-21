@@ -340,6 +340,30 @@
           </el-select>
         </el-form-item>
         <el-alert
+          v-if="!proxyDialog.strategy"
+          title="请明确选择本次账号切换使用的出口；系统不会默认切换为直连"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="mb-3"
+        />
+        <el-alert
+          v-else-if="proxyDialog.strategy === 'direct'"
+          title="直连会向 Telegram 暴露面板公网 IP；只有确认承担该风险时才应用"
+          type="error"
+          :closable="false"
+          show-icon
+          class="mb-3"
+        />
+        <el-alert
+          v-else-if="proxyDialog.strategy === 'global'"
+          title="仅在系统已配置有效 Telegram 全局代理时可用；未配置会拒绝保存，不会回退直连"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="mb-3"
+        />
+        <el-alert
           v-if="proxyDialog.strategy === 'warp_per_account'"
           :title="`将创建 ${proxyDialog.accountIds.length} 个独立 WARP 代理，并逐一绑定账号`"
           type="warning"
@@ -822,7 +846,7 @@ const proxyDialog = reactive({
   running: false,
   title: '切换代理',
   accountIds: [] as number[],
-  strategy: 'direct' as AccountProxyStrategy,
+  strategy: '' as AccountProxyStrategy | '',
   proxyId: null as number | null,
   expectedProxyId: null as number | null,
 })
@@ -1448,7 +1472,9 @@ function openAccountProxy(accountIds: number[], row?: Row) {
   proxyDialog.accountIds = [...accountIds]
   proxyDialog.title = accountIds.length > 1 ? `批量切换代理（${accountIds.length} 个账号）` : `切换代理 - ${row?.displayPhone || ''}`
   proxyDialog.expectedProxyId = row?.proxy?.id ?? 0
-  proxyDialog.strategy = row?.proxy ? 'existing' : row?.useGlobalProxy ? 'global' : 'direct'
+  proxyDialog.strategy = row
+    ? row.proxy ? 'existing' : row.useGlobalProxy ? 'global' : 'direct'
+    : ''
   proxyDialog.proxyId = row?.proxy?.id ?? null
   proxyDialog.visible = true
 }
@@ -1464,6 +1490,10 @@ async function saveAccountProxy() {
   const proxyId = proxyDialog.proxyId
   const expectedProxyId = proxyDialog.expectedProxyId
 
+  if (!strategy) {
+    ElMessage.warning('请先明确选择本次账号切换使用的代理方式')
+    return
+  }
   if (strategy === 'existing' && !proxyId) {
     ElMessage.warning('请选择要绑定的代理')
     return

@@ -474,7 +474,7 @@ public class AccountExportService
             return resolution.Proxy;
 
         return resolution.UseGlobalProxy
-            ? GlobalTelegramProxyConfiguration.Build(_configuration)
+            ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
             : null;
     }
 

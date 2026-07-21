@@ -392,8 +392,22 @@ internal static class TelegramImportProxyConfigurator
     public static void Apply(
         Client client,
         ProxyConnectionOptions? proxy,
+        CancellationToken cancellationToken = default) =>
+        TelegramClientProxyConfigurator.Apply(client, proxy, cancellationToken);
+}
+
+/// <summary>
+/// 为所有 WTelegram 客户端统一应用数据库代理快照。
+/// </summary>
+internal static class TelegramClientProxyConfigurator
+{
+    public static void Apply(
+        Client client,
+        ProxyConnectionOptions? proxy,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(client);
+
         if (proxy is { Protocol: OutboundProxyProtocols.Http or OutboundProxyProtocols.Socks5 })
         {
             client.TcpHandler = (address, port) =>

@@ -47,7 +47,7 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
 
     public int ActiveClientCount => _clients.Count;
 
-    public async Task<Client> GetOrCreateClientAsync(
+    public Task<Client> GetOrCreateClientAsync(
         int accountId,
         int apiId,
         string apiHash,
@@ -55,6 +55,49 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
         string? sessionKey = null,
         string? phoneNumber = null,
         long? userId = null)
+    {
+        return GetOrCreateClientCoreAsync(
+            accountId,
+            apiId,
+            apiHash,
+            sessionPath,
+            sessionKey,
+            phoneNumber,
+            userId,
+            proxyOverride: null);
+    }
+
+    public Task<Client> GetOrCreateClientAsync(
+        int accountId,
+        int apiId,
+        string apiHash,
+        string sessionPath,
+        string? sessionKey,
+        string? phoneNumber,
+        long? userId,
+        AccountProxyResolution proxyResolution)
+    {
+        ArgumentNullException.ThrowIfNull(proxyResolution);
+        return GetOrCreateClientCoreAsync(
+            accountId,
+            apiId,
+            apiHash,
+            sessionPath,
+            sessionKey,
+            phoneNumber,
+            userId,
+            proxyResolution);
+    }
+
+    private async Task<Client> GetOrCreateClientCoreAsync(
+        int accountId,
+        int apiId,
+        string apiHash,
+        string sessionPath,
+        string? sessionKey,
+        string? phoneNumber,
+        long? userId,
+        AccountProxyResolution? proxyOverride)
     {
         sessionPath = _sessionPathResolver.Resolve(sessionPath);
 
@@ -67,6 +110,12 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
             // 双重检查
             if (_clients.TryGetValue(accountId, out existingClient) && existingClient.User != null)
             {
+                if (proxyOverride != null)
+                {
+                    throw new InvalidOperationException(
+                        $"登录临时 ID {accountId} 已被现有客户端占用，已阻止复用未知出口");
+                }
+
                 return existingClient;
             }
 
@@ -77,20 +126,19 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
 
             _logger.LogInformation("Creating new Telegram client for account {AccountId}", accountId);
 
-            var proxyResolution = await _proxyResolver.ResolveAsync(accountId);
-            var accountProxy = proxyResolution.Proxy;
-            var useGlobalProxy = accountProxy == null && proxyResolution.UseGlobalProxy;
+            // 手动登录使用尚未入库的临时 ID，必须优先采用调用方在首次连接前
+            // 明确解析的路由，禁止因为数据库查不到账号而降级到全局或直连。
+            var proxyResolution = proxyOverride
+                                  ?? await _proxyResolver.ResolveAsync(accountId);
+            var accountProxy = proxyResolution.Proxy
+                               ?? (proxyResolution.UseGlobalProxy
+                                   ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                                   : null);
 
             // 使用 config 回调设置 session 路径
             phoneNumber = NormalizePhone(phoneNumber);
             string Config(string what)
             {
-                var proxyServer = useGlobalProxy ? (_configuration["Telegram:Proxy:Server"] ?? "").Trim() : string.Empty;
-                var proxyPort = useGlobalProxy ? (_configuration["Telegram:Proxy:Port"] ?? "").Trim() : string.Empty;
-                var proxyUsername = useGlobalProxy ? (_configuration["Telegram:Proxy:Username"] ?? "").Trim() : string.Empty;
-                var proxyPassword = useGlobalProxy ? (_configuration["Telegram:Proxy:Password"] ?? "").Trim() : string.Empty;
-                var proxySecret = useGlobalProxy ? (_configuration["Telegram:Proxy:Secret"] ?? "").Trim() : string.Empty;
-
                 return what switch
                 {
                     "api_id" => apiId.ToString(),
@@ -100,25 +148,14 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
                     "phone_number" => string.IsNullOrWhiteSpace(phoneNumber) ? null! : phoneNumber,
                     "user_id" => userId.HasValue && userId.Value > 0 ? userId.Value.ToString() : null!,
 
-                    // 代理（可选）：用于 Telegram MTProto 连接（WTelegramClient）。
-                    // 常见场景：宿主机能直连 Telegram，但 Docker/服务器环境需要代理。
-                    // - SOCKS5/HTTP：配置 server/port；如需认证再填 username/password
-                    // - MTProto：额外配置 secret
-                    "proxy_server" => string.IsNullOrWhiteSpace(proxyServer) ? null! : proxyServer,
-                    "proxy_port" => string.IsNullOrWhiteSpace(proxyPort) ? null! : proxyPort,
-                    "proxy_username" => string.IsNullOrWhiteSpace(proxyUsername) ? null! : proxyUsername,
-                    "proxy_password" => string.IsNullOrWhiteSpace(proxyPassword) ? null! : proxyPassword,
-                    "proxy_secret" => string.IsNullOrWhiteSpace(proxySecret) ? null! : proxySecret,
-
                     _ => null!  // 使用 null! 抑制警告，这是 WTelegramClient 的预期行为
                 };
             }
 
             var client = new Client(Config);
+            TelegramClientProxyConfigurator.Apply(client, accountProxy);
             if (accountProxy is { Protocol: OutboundProxyProtocols.Http or OutboundProxyProtocols.Socks5 })
             {
-                client.TcpHandler = (address, port) =>
-                    ProxyTcpConnector.ConnectAsync(address, port, accountProxy);
                 _logger.LogInformation(
                     "Account {AccountId} uses {ProxyKind} proxy {ProxyId} ({Protocol})",
                     accountId,
@@ -128,7 +165,6 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
             }
             else if (accountProxy is { Protocol: OutboundProxyProtocols.MtProto })
             {
-                client.MTProxyUrl = BuildMtProxyUrl(accountProxy);
                 _logger.LogInformation(
                     "Account {AccountId} uses MTProxy {ProxyId}",
                     accountId,
@@ -201,11 +237,23 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
 
     public async Task RemoveClientAsync(int accountId)
     {
+        await RemoveClientWithLockAsync(accountId, throwOnDisposeFailure: false);
+    }
+
+    public async Task RemoveClientStrictAsync(int accountId)
+    {
+        await RemoveClientWithLockAsync(accountId, throwOnDisposeFailure: true);
+    }
+
+    private async Task RemoveClientWithLockAsync(
+        int accountId,
+        bool throwOnDisposeFailure)
+    {
         var lockObj = GetAccountLock(accountId);
         await lockObj.WaitAsync();
         try
         {
-            await RemoveClientCoreAsync(accountId);
+            await RemoveClientCoreAsync(accountId, throwOnDisposeFailure);
         }
         finally
         {
@@ -225,14 +273,26 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
         }
     }
 
-    private async Task RemoveClientCoreAsync(int accountId)
+    private async Task RemoveClientCoreAsync(
+        int accountId,
+        bool throwOnDisposeFailure = false)
     {
         Client? client;
         lock (_lifecycleGate)
         {
-            _updateManagers.TryRemove(accountId, out _);
-            if (!_clients.TryRemove(accountId, out client))
-                return;
+            if (throwOnDisposeFailure)
+            {
+                // 严格释放必须在确认 DisposeAsync 成功后才能移除引用。
+                // 若释放失败，保留客户端以便下次重试，禁止调用方误以为旧出口已断开。
+                if (!_clients.TryGetValue(accountId, out client))
+                    return;
+            }
+            else
+            {
+                _updateManagers.TryRemove(accountId, out _);
+                if (!_clients.TryRemove(accountId, out client))
+                    return;
+            }
         }
 
         _logger.LogInformation("Removing Telegram client for account {AccountId}", accountId);
@@ -240,10 +300,28 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
         try
         {
             await client.DisposeAsync();
+            if (throwOnDisposeFailure)
+            {
+                lock (_lifecycleGate)
+                {
+                    if (_clients.TryGetValue(accountId, out var current)
+                        && ReferenceEquals(current, client))
+                    {
+                        _clients.TryRemove(accountId, out _);
+                        _updateManagers.TryRemove(accountId, out _);
+                    }
+                }
+            }
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error disposing client for account {AccountId}", accountId);
+            if (throwOnDisposeFailure)
+            {
+                throw new InvalidOperationException(
+                    $"账号 {accountId} 的旧 Telegram 客户端无法确认已断开",
+                    ex);
+            }
         }
     }
 
@@ -370,16 +448,6 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
             // Docker 日志管道可能反压应用线程，表现为容器还在但 Kestrel 不再响应。
             // 这里默认丢弃底层 trace，只保留上面的 RPC 错误/限流日志。
         };
-    }
-
-    private static string BuildMtProxyUrl(ProxyConnectionOptions proxy)
-    {
-        if (string.IsNullOrWhiteSpace(proxy.Secret))
-            throw new InvalidOperationException($"MTProxy {proxy.ProxyId} 缺少 Secret");
-
-        return $"https://t.me/proxy?server={Uri.EscapeDataString(proxy.Host)}"
-               + $"&port={proxy.Port}"
-               + $"&secret={Uri.EscapeDataString(proxy.Secret)}";
     }
 
     private async Task HandleTelegramUpdateAsync(int accountId, UpdateManager updateManager, Update update)

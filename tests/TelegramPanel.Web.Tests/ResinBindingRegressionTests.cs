@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -21,6 +22,88 @@ namespace TelegramPanel.Web.Tests;
 
 public sealed class ResinBindingRegressionTests
 {
+    [Fact]
+    public async Task Resin平台名称遵循官方V1规则并允许合法符号()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = CreateProxyService(db);
+
+        var proxy = await service.CreateAsync(NewResinInput("Telegram+Pool(1)"));
+
+        Assert.Equal("Telegram+Pool(1)", proxy.ResinPlatform);
+    }
+
+    [Theory]
+    [InlineData("api")]
+    [InlineData("bad.name")]
+    [InlineData("bad name")]
+    public async Task Resin平台名称拒绝官方V1保留名称和分隔字符(string platform)
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = CreateProxyService(db);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.CreateAsync(NewResinInput(platform)));
+    }
+
+    [Fact]
+    public async Task Resin的Socks5身份在保存时校验UTF8字节上限()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = CreateProxyService(db);
+        var longPlatform = new string('中', 74);
+        var input = NewResinInput(longPlatform) with
+        {
+            Protocol = OutboundProxyProtocols.Socks5
+        };
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.CreateAsync(input));
+
+        Assert.Contains("255 字节", error.Message);
+    }
+
+    [Fact]
+    public async Task Resin的Socks5ProxyToken在保存时校验UTF8字节上限()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = CreateProxyService(db);
+        var input = NewResinInput("Default") with
+        {
+            Protocol = OutboundProxyProtocols.Socks5,
+            Password = new string('密', 86)
+        };
+
+        var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+            service.CreateAsync(input));
+
+        Assert.Contains("255 字节", error.Message);
+    }
+
     [Fact]
     public async Task 重复绑定同一Resin代理不会释放当前粘性Lease()
     {
@@ -141,7 +224,9 @@ public sealed class ResinBindingRegressionTests
         Assert.Equal(targetProxy.Id, switched.ProxyId);
         Assert.False(switched.UseGlobalProxy);
         Assert.Equal(2, resin.Requests.Count(x =>
-            x.StartsWith("DELETE /api/v1/platforms/default-id/leases/tg_account_", StringComparison.Ordinal)));
+            x.StartsWith(
+                "DELETE /api/v1/platforms/default-id/leases/tg_account_",
+                StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -208,7 +293,9 @@ public sealed class ResinBindingRegressionTests
     public async Task Resin释放失败时废号清理不会先删除Session文件()
     {
         await using var resin = new ResinControlPlaneStub(HttpStatusCode.ServiceUnavailable);
-        var sessionPath = Path.Combine(Path.GetTempPath(), $"resin-purge-{Guid.NewGuid():N}.session");
+        var sessionPath = Path.Combine(
+            Path.GetTempPath(),
+            $"resin-purge-{Guid.NewGuid():N}.session");
         await File.WriteAllTextAsync(sessionPath, "session-data");
         try
         {
@@ -310,11 +397,117 @@ public sealed class ResinBindingRegressionTests
 
         Assert.Equal(1, result.Success);
         Assert.Null((await db.Accounts.AsNoTracking().SingleAsync()).ProxyId);
-        Assert.DoesNotContain(resin.Requests, x => x.StartsWith("DELETE ", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            resin.Requests,
+            x => x.StartsWith("DELETE ", StringComparison.Ordinal));
     }
 
     [Fact]
-    public async Task 导入阶段的Resin临时粘性Lease会按稳定身份回收()
+    public async Task Resin平台查询会翻页定位目标并释放Lease()
+    {
+        await using var resin = new ResinControlPlaneStub
+        {
+            TargetPlatformOnSecondPage = true
+        };
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "resin-platform-page",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Http,
+            Host = "127.0.0.1",
+            Port = 8080,
+            ResinPlatform = "Default",
+            ResinAdminUrl = resin.BaseAddress.AbsoluteUri,
+            ResinAdminToken = "admin-token",
+            IsEnabled = true,
+            TestStatus = "unknown"
+        };
+        var account = new Account
+        {
+            Phone = "8613800000105",
+            UserId = 10006,
+            SessionPath = "sessions/resin-platform-page.session",
+            ApiId = 1,
+            ApiHash = "hash",
+            Proxy = proxy
+        };
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var result = await CreateProxyService(db).BindAccountsAsync(
+            new[] { account.Id },
+            new AccountProxyBindingInput("direct"));
+
+        Assert.Equal(1, result.Success);
+        Assert.Contains(
+            resin.Requests,
+            request => request.Contains("offset=100", StringComparison.Ordinal));
+        Assert.Contains(
+            $"DELETE /api/v1/platforms/default-id/leases/tg_account_{account.Id} HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task Resin管理地址路径前缀会保留到平台查询和Lease删除()
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "resin-admin-prefix",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Http,
+            Host = "127.0.0.1",
+            Port = 8080,
+            ResinPlatform = "Default",
+            ResinAdminUrl = new Uri(resin.BaseAddress, "resin-admin").AbsoluteUri,
+            ResinAdminToken = "admin-token",
+            IsEnabled = true,
+            TestStatus = "unknown"
+        };
+        var account = new Account
+        {
+            Phone = "8613800000108",
+            UserId = 10008,
+            SessionPath = "sessions/resin-admin-prefix.session",
+            ApiId = 1,
+            ApiHash = "hash",
+            Proxy = proxy
+        };
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var result = await CreateProxyService(db).BindAccountsAsync(
+            new[] { account.Id },
+            new AccountProxyBindingInput("direct"));
+
+        Assert.Equal(1, result.Success);
+        Assert.Contains(
+            resin.Requests,
+            request => request.StartsWith(
+                "GET /resin-admin/api/v1/platforms?",
+                StringComparison.Ordinal));
+        Assert.Contains(
+            $"DELETE /resin-admin/api/v1/platforms/default-id/leases/"
+            + $"tg_account_{account.Id} HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task Resin代理删除后导入临时Lease仍使用创建时快照回收()
     {
         await using var resin = new ResinControlPlaneStub();
         await using var connection = new SqliteConnection("Data Source=:memory:");
@@ -340,8 +533,16 @@ public sealed class ResinBindingRegressionTests
         db.OutboundProxies.Add(proxy);
         await db.SaveChangesAsync();
 
-        await CreateProxyService(db).ReleaseImportResinLeaseBestEffortAsync(
+        var snapshot = new ResinLeaseControlSnapshot(
             proxy.Id,
+            proxy.ResinAdminUrl,
+            proxy.ResinAdminToken,
+            proxy.ResinPlatform);
+        db.OutboundProxies.Remove(proxy);
+        await db.SaveChangesAsync();
+
+        await CreateProxyService(db).ReleaseImportResinLeaseBestEffortAsync(
+            snapshot,
             "tg_import_0123456789abcdef");
 
         Assert.Contains(
@@ -381,6 +582,168 @@ public sealed class ResinBindingRegressionTests
         Assert.Contains(
             $"DELETE /api/v1/platforms/default-id/leases/telegram_panel_probe_{proxy.Id} HTTP/1.1",
             resin.Requests);
+    }
+
+    [Theory]
+    [InlineData("proxy-token", "proxy-token")]
+    [InlineData(null, "telegram-panel")]
+    public async Task Resin导入临时Lease会通过数据面Token继承给稳定账号(
+        string? proxyToken,
+        string expectedTokenPath)
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var service = CreateProxyService(db);
+        var proxyConnection = new ProxyConnectionOptions(
+            7,
+            "resin-import-inherit",
+            OutboundProxyKinds.Resin,
+            OutboundProxyProtocols.Http,
+            resin.BaseAddress.Host,
+            resin.BaseAddress.Port,
+            "Default.tg_import_parent",
+            proxyToken,
+            null);
+
+        var inherited = await service.InheritImportResinLeaseBestEffortAsync(
+            proxyConnection,
+            "Default",
+            "tg_import_parent",
+            "tg_account_42");
+
+        Assert.True(inherited);
+        Assert.Contains(
+            $"POST /{expectedTokenPath}/api/v1/Default/actions/inherit-lease HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task Resin控制面明确报告旧认证模式时给出V1迁移提示()
+    {
+        await using var resin = new ResinControlPlaneStub
+        {
+            AuthVersion = "LEGACY_V0"
+        };
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "resin-legacy-auth",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Http,
+            Host = "127.0.0.1",
+            Port = 1,
+            Password = "proxy-token",
+            ResinPlatform = "Default",
+            ResinAdminUrl = resin.BaseAddress.AbsoluteUri,
+            ResinAdminToken = "admin-token",
+            IsEnabled = true,
+            TestStatus = "unknown"
+        };
+        db.OutboundProxies.Add(proxy);
+        await db.SaveChangesAsync();
+
+        var tested = await CreateProxyService(db).TestAsync(proxy.Id);
+
+        Assert.Equal("fail", tested.TestStatus);
+        Assert.Contains("RESIN_AUTH_VERSION=V1", tested.LastError);
+    }
+
+    [Fact]
+    public async Task Resin平台仅大小写变化也会释放旧身份Lease()
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "resin-platform-case",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Http,
+            Host = "127.0.0.1",
+            Port = 8080,
+            Password = "proxy-token",
+            ResinPlatform = "Default",
+            ResinAdminUrl = resin.BaseAddress.AbsoluteUri,
+            ResinAdminToken = "admin-token",
+            IsEnabled = true,
+            TestStatus = "unknown"
+        };
+        var account = new Account
+        {
+            Phone = "8613800000106",
+            UserId = 10007,
+            SessionPath = "sessions/resin-platform-case.session",
+            ApiId = 1,
+            ApiHash = "hash",
+            Proxy = proxy
+        };
+        db.Accounts.Add(account);
+        await db.SaveChangesAsync();
+
+        var updated = await CreateProxyService(db).UpdateAsync(
+            proxy.Id,
+            NewResinInput("default"));
+
+        Assert.Equal("default", updated.ResinPlatform);
+        Assert.Contains(
+            $"DELETE /api/v1/platforms/default-id/leases/tg_account_{account.Id} HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task Resin已保存的ProxyToken和管理令牌可以显式清除()
+    {
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = new OutboundProxy
+        {
+            Name = "resin-clear-token",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Http,
+            Host = "127.0.0.1",
+            Port = 2260,
+            Password = "old-proxy-token",
+            ResinPlatform = "Default",
+            ResinAdminUrl = "http://127.0.0.1:2260",
+            ResinAdminToken = "old-admin-token",
+            IsEnabled = true,
+            TestStatus = "unknown"
+        };
+        db.OutboundProxies.Add(proxy);
+        await db.SaveChangesAsync();
+        var input = NewResinInput("Default") with
+        {
+            ResinAdminUrl = proxy.ResinAdminUrl,
+            ClearPassword = true,
+            ClearResinAdminToken = true
+        };
+
+        var updated = await CreateProxyService(db).UpdateAsync(proxy.Id, input);
+
+        Assert.Null(updated.Password);
+        Assert.Null(updated.ResinAdminToken);
     }
 
     [Fact]
@@ -501,6 +864,21 @@ public sealed class ResinBindingRegressionTests
             NullLogger<ProxyManagementService>.Instance);
     }
 
+    private static OutboundProxyInput NewResinInput(string platform) => new(
+        "resin-validation",
+        OutboundProxyKinds.Resin,
+        OutboundProxyProtocols.Http,
+        "127.0.0.1",
+        2260,
+        Username: null,
+        Password: "proxy-token",
+        Secret: null,
+        ResinPlatform: platform,
+        ResinAdminUrl: null,
+        ResinAdminToken: null,
+        IsEnabled: true,
+        TestAfterSave: false);
+
     private sealed class NoopClientPool : ITelegramClientPool
     {
         public int ActiveClientCount => 0;
@@ -548,6 +926,10 @@ public sealed class ResinBindingRegressionTests
         public bool IncludePlatform { get; set; } = true;
 
         public long? PlatformContentLengthOverride { get; set; }
+
+        public bool TargetPlatformOnSecondPage { get; set; }
+
+        public string? AuthVersion { get; set; }
 
         public IReadOnlyCollection<string> Requests => _requests.ToArray();
 
@@ -603,12 +985,16 @@ public sealed class ResinBindingRegressionTests
             {
             }
 
-            var body = requestLine.StartsWith("GET /api/v1/platforms", StringComparison.Ordinal)
-                ? IncludePlatform
-                    ? "{\"items\":[{\"id\":\"default-id\",\"name\":\"Default\"}]}"
-                    : "{\"items\":[]}"
-                : "{}";
-            var status = requestLine.StartsWith("DELETE /api/v1/platforms/", StringComparison.Ordinal)
+            var routeLine = requestLine.Replace(" /resin-admin/", " /", StringComparison.Ordinal);
+            var body = routeLine.StartsWith("GET /api/v1/platforms", StringComparison.Ordinal)
+                ? BuildPlatformBody(routeLine)
+                : routeLine.StartsWith("GET /api/v1/system/info", StringComparison.Ordinal)
+                    && !string.IsNullOrWhiteSpace(AuthVersion)
+                    ? $"{{\"auth_version\":\"{AuthVersion}\"}}"
+                    : "{}";
+            var status = routeLine.StartsWith(
+                "DELETE /api/v1/platforms/",
+                StringComparison.Ordinal)
                 ? LeaseDeleteStatus
                 : HttpStatusCode.OK;
             var bodyBytes = Encoding.UTF8.GetBytes(body);
@@ -616,9 +1002,37 @@ public sealed class ResinBindingRegressionTests
                 ? PlatformContentLengthOverride ?? bodyBytes.Length
                 : bodyBytes.Length;
             var headers = Encoding.ASCII.GetBytes(
-                $"HTTP/1.1 {(int)status} {status}\r\nContent-Type: application/json\r\nContent-Length: {contentLength}\r\nConnection: close\r\n\r\n");
+                $"HTTP/1.1 {(int)status} {status}\r\n"
+                + "Content-Type: application/json\r\n"
+                + $"Content-Length: {contentLength}\r\n"
+                + "Connection: close\r\n\r\n");
             await stream.WriteAsync(headers, cancellationToken);
             await stream.WriteAsync(bodyBytes, cancellationToken);
+        }
+
+        private string BuildPlatformBody(string requestLine)
+        {
+            if (!IncludePlatform)
+                return "{\"items\":[]}";
+            if (!TargetPlatformOnSecondPage)
+                return "{\"items\":[{\"id\":\"default-id\",\"name\":\"Default\"}]}";
+            if (requestLine.Contains("offset=100", StringComparison.Ordinal))
+            {
+                return "{\"total\":101,\"items\":["
+                       + "{\"id\":\"default-id\",\"name\":\"Default\"}]}";
+            }
+
+            var items = Enumerable.Range(0, 100)
+                .Select(index => new
+                {
+                    id = $"other-{index}",
+                    name = $"Default-{index}"
+                });
+            return JsonSerializer.Serialize(new
+            {
+                total = 101,
+                items
+            });
         }
     }
 }

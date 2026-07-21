@@ -8,18 +8,32 @@
 # Build outputs
 **/bin
 **/obj
+**/.tmp/**
 artifacts
 frontend/node_modules
 src/TelegramPanel.Web/wwwroot/panel-spa
+tests/**
 
 # Docker runtime data
 docker-data
 .env
+appsettings.local.json
+**/appsettings.local.json
+admin_auth.json
+**/admin_auth.json
+data-protection-keys
+**/data-protection-keys
+uploads
+**/uploads
 
 # Temporary & logs
 .tmp
+.playwright-cli
+output
 logs
 sessions
+session数据
+**/*.session
 todolist
 
 # Database & cache
@@ -38,6 +52,7 @@ README.md
 
 # Module source (development only)
 模块源码
+modules/**
 
 # Misc
 *.md

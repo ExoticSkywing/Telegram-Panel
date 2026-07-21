@@ -90,6 +90,27 @@ public sealed class ProxyTcpConnectorTests
         await serverTask;
     }
 
+    [Theory]
+    [InlineData("telegram.example\r\nX-Injected: true")]
+    [InlineData("telegram.example/path")]
+    [InlineData("[2001:db8::1")]
+    public async Task Connect_在连接代理前拒绝非法目标主机(string targetHost)
+    {
+        var options = new ProxyConnectionOptions(
+            3,
+            "HTTP",
+            OutboundProxyKinds.Manual,
+            OutboundProxyProtocols.Http,
+            IPAddress.Loopback.ToString(),
+            1,
+            null,
+            null,
+            null);
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            ProxyTcpConnector.ConnectAsync(targetHost, 443, options));
+    }
+
     [Fact]
     public void Resin_按账号生成稳定粘性身份()
     {

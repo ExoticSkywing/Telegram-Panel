@@ -1,14 +1,97 @@
 @page "/accounts/login"
 @inject IAccountService AccountService
 @inject AccountManagementService AccountManagement
+@inject TelegramPanel.Core.Services.Proxy.ProxyManagementService ProxyManagement
+@inject TelegramPanel.Web.Services.AccountLoginProxyCoordinator LoginProxy
 @inject IConfiguration Configuration
 @inject ISnackbar Snackbar
 @inject NavigationManager Navigation
+@using TelegramPanel.Core.Models
+@using TelegramPanel.Core.Services.Proxy
 @using TelegramPanel.Data.Entities
+@implements IAsyncDisposable
 
 <PageTitle>手动登录 - Telegram Panel</PageTitle>
 
 <MudText Typo="Typo.h4" Class="mb-4">手动登录</MudText>
+
+<MudCard Class="mb-4">
+    <MudCardHeader>
+        <MudText Typo="Typo.h6">登录首次 Telegram 连接出口</MudText>
+    </MudCardHeader>
+    <MudCardContent>
+        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
+            必须在发送验证码之前明确选择。登录会话建立后会冻结出口，避免中途切换 IP。
+        </MudText>
+
+        <MudRadioGroup T="string" @bind-Value="proxyStrategy">
+            <MudRadio T="string" Value="@("existing")" Color="Color.Primary" Disabled="@(logging || ProxyRouteLocked)">
+                已有代理
+            </MudRadio>
+            <MudRadio T="string" Value="@("warp_per_account")" Color="Color.Primary"
+                      Disabled="@(logging || ProxyRouteLocked || !WarpAvailable)">
+                一键创建独立 WARP
+            </MudRadio>
+            <MudRadio T="string" Value="@("global")" Color="Color.Warning" Disabled="@(logging || ProxyRouteLocked)">
+                全局设置
+            </MudRadio>
+            <MudRadio T="string" Value="@("direct")" Color="Color.Error" Disabled="@(logging || ProxyRouteLocked)">
+                直连（确认风险）
+            </MudRadio>
+        </MudRadioGroup>
+
+        @if (proxyStrategy == "existing")
+        {
+            <MudSelect T="int?" @bind-Value="selectedProxyId" Label="选择已有代理" Variant="Variant.Outlined"
+                       Dense="true" Clearable="true" Disabled="@(logging || ProxyRouteLocked)" Class="mt-3">
+                @foreach (var proxy in proxyOptions)
+                {
+                    <MudSelectItem T="int?" Value="@((int?)proxy.Id)">
+                        @FormatProxyOption(proxy)
+                    </MudSelectItem>
+                }
+            </MudSelect>
+
+            @if (proxyOptions.Count == 0)
+            {
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                    当前没有已启用代理，请先到新版【代理管理】新增代理，或改选独立 WARP。
+                </MudAlert>
+            }
+        }
+
+        @if (ProxyRouteLocked)
+        {
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                当前登录会话已锁定首次出口。如需更换代理，请先点击“重置”。
+            </MudAlert>
+        }
+        else if (string.IsNullOrWhiteSpace(proxyStrategy))
+        {
+            <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                为防止发送验证码时使用面板直连 IP，请先明确选择已有代理或一键 WARP。
+            </MudAlert>
+        }
+        else if (proxyStrategy == "direct")
+        {
+            <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                已明确选择直连：Telegram 从发送验证码开始即可看到面板公网 IP。
+            </MudAlert>
+        }
+        else if (proxyStrategy == "global" && !GlobalProxyConfigured)
+        {
+            <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                Telegram 全局代理未配置或配置无效，已阻止登录，避免回退为直连。
+            </MudAlert>
+        }
+        else if (proxyStrategy == "warp_per_account" && !WarpAvailable)
+        {
+            <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                当前环境无法创建 WARP，请检查 WARP 配置和 Docker 状态。
+            </MudAlert>
+        }
+    </MudCardContent>
+</MudCard>
 
 <MudGrid>
     <MudItem xs="12" md="6" Class="mx-auto">
@@ -95,7 +178,7 @@
                 @if (currentStep != LoginStep.Done)
                 {
                     <MudButton Variant="Variant.Filled" Color="Color.Primary"
-                               Disabled="@logging"
+                               Disabled="@(logging || (currentStep == LoginStep.Phone && (ProxySelectionInvalid || ProxyRouteLocked)))"
                                OnClick="@(async (MouseEventArgs _) => await NextAsync())">
                         @if (logging)
                         {
@@ -123,10 +206,104 @@
     private string verificationCode = "";
     private string password = "";
 
+    private string proxyStrategy = "";
+    private int? selectedProxyId;
+    private List<OutboundProxy> proxyOptions = new();
+    private WarpRuntimeStatus? warpStatus;
+    private readonly CancellationTokenSource _pageCts = new();
+
     private string? username = "";
     private long userId = 0;
     private int accountId = 0;
     private LoginStep currentStep = LoginStep.Phone;
+
+    private bool ProxyRouteLocked =>
+        currentStep != LoginStep.Phone
+        || (accountId > 0 && LoginProxy.HasState(accountId));
+
+    private bool WarpAvailable => warpStatus is
+    {
+        PlatformSupported: true,
+        Enabled: true,
+        DockerAvailable: true
+    };
+
+    private bool GlobalProxyConfigured
+    {
+        get
+        {
+            try
+            {
+                return GlobalTelegramProxyConfiguration.Build(Configuration) != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    private bool ProxySelectionInvalid =>
+        string.IsNullOrWhiteSpace(proxyStrategy)
+        || (proxyStrategy == "existing"
+            && (selectedProxyId is not > 0
+                || proxyOptions.All(x => x.Id != selectedProxyId.Value)))
+        || (proxyStrategy == "warp_per_account" && !WarpAvailable)
+        || (proxyStrategy == "global" && !GlobalProxyConfigured);
+
+    protected override async Task OnInitializedAsync()
+    {
+        var proxiesTask = ProxyManagement.ListAsync(_pageCts.Token);
+        var warpStatusTask = ProxyManagement.GetWarpStatusAsync(_pageCts.Token);
+
+        try
+        {
+            proxyOptions = (await proxiesTask)
+                .Where(x => x.IsEnabled)
+                .OrderByDescending(x => x.Id)
+                .ToList();
+        }
+        catch (OperationCanceledException) when (_pageCts.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"加载代理列表失败：{ex.Message}", Severity.Warning);
+        }
+
+        try
+        {
+            warpStatus = await warpStatusTask;
+        }
+        catch (OperationCanceledException) when (_pageCts.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"检查 WARP 环境失败：{ex.Message}", Severity.Warning);
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _pageCts.Cancel();
+        var loginId = accountId;
+        accountId = 0;
+        if (loginId > 0)
+        {
+            try
+            {
+                await CleanupLoginSessionAsync(loginId);
+            }
+            catch
+            {
+                // 页面销毁时保留后台清理入口，不能因清理异常阻断组件释放。
+            }
+        }
+        _pageCts.Dispose();
+    }
 
     private bool TryGetTelegramApi(out int apiId, out string apiHash, out string configuredSessionsPath)
     {
@@ -138,6 +315,51 @@
     }
 
     private bool IsApiConfigured => TryGetTelegramApi(out _, out _, out _);
+
+    private static string FormatProxyOption(OutboundProxy proxy)
+    {
+        var endpoint = string.IsNullOrWhiteSpace(proxy.EgressIp)
+            ? $"{proxy.Host}:{proxy.Port}"
+            : proxy.EgressIp;
+        return $"{proxy.Name} · {proxy.Protocol.ToUpperInvariant()} · {endpoint}";
+    }
+
+    private bool TryGetSelectedProxy(out string strategy, out int? proxyId)
+    {
+        strategy = (proxyStrategy ?? string.Empty).Trim().ToLowerInvariant();
+        proxyId = null;
+        switch (strategy)
+        {
+            case "direct":
+                return true;
+            case "global":
+                if (!GlobalProxyConfigured)
+                {
+                    Snackbar.Add("Telegram 全局代理未配置或配置无效，已阻止登录以避免直连", Severity.Error);
+                    return false;
+                }
+                return true;
+            case "existing":
+                if (selectedProxyId is not > 0
+                    || proxyOptions.All(x => x.Id != selectedProxyId.Value))
+                {
+                    Snackbar.Add("请选择一个已启用的代理", Severity.Warning);
+                    return false;
+                }
+                proxyId = selectedProxyId.Value;
+                return true;
+            case "warp_per_account":
+                if (!WarpAvailable)
+                {
+                    Snackbar.Add("当前环境无法创建 WARP，请检查 WARP 配置和 Docker 状态", Severity.Error);
+                    return false;
+                }
+                return true;
+            default:
+                Snackbar.Add("请先明确选择登录首次连接使用的代理方式", Severity.Warning);
+                return false;
+        }
+    }
 
     private string StepTitle => currentStep switch
     {
@@ -158,15 +380,17 @@
 
     private async Task ResetAsync()
     {
-        if (accountId != 0)
+        var loginId = accountId;
+        if (loginId > 0)
         {
             try
             {
-                await AccountService.ReleaseClientAsync(accountId);
+                await CleanupLoginSessionAsync(loginId);
             }
-            catch
+            catch (Exception ex)
             {
-                // 忽略释放失败，避免影响 UI 重置
+                Snackbar.Add($"旧登录客户端无法安全停止，已保留冻结路由：{ex.Message}", Severity.Error);
+                return;
             }
         }
 
@@ -176,18 +400,46 @@
         password = "";
         username = "";
         userId = 0;
+        proxyStrategy = "";
+        selectedProxyId = null;
         currentStep = LoginStep.Phone;
     }
 
-    private Task PreviousAsync()
+    private async Task PreviousAsync()
     {
-        currentStep = currentStep switch
+        if (currentStep == LoginStep.Password)
         {
-            LoginStep.Code => LoginStep.Phone,
-            LoginStep.Password => LoginStep.Code,
-            _ => currentStep
-        };
-        return Task.CompletedTask;
+            currentStep = LoginStep.Code;
+            return;
+        }
+
+        if (currentStep != LoginStep.Code)
+            return;
+
+        // 返回手机号步骤代表放弃当前授权会话。必须先回收冻结的路由，
+        // 避免再次发送验证码时覆盖 accountId 并遗留临时 WARP/Resin Lease。
+        logging = true;
+        try
+        {
+            var loginId = accountId;
+            if (loginId > 0)
+                await CleanupLoginSessionAsync(loginId);
+            accountId = 0;
+
+            verificationCode = "";
+            password = "";
+            proxyStrategy = "";
+            selectedProxyId = null;
+            currentStep = LoginStep.Phone;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"旧登录客户端无法安全停止，已保留冻结路由：{ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            logging = false;
+        }
     }
 
     private async Task NextAsync()
@@ -197,6 +449,15 @@
         {
             if (currentStep == LoginStep.Phone)
             {
+                if (ProxyRouteLocked)
+                {
+                    Snackbar.Add("当前登录会话已锁定首次出口；如需重新发送验证码或更换代理，请先重置", Severity.Warning);
+                    return;
+                }
+
+                if (!TryGetSelectedProxy(out var selectedStrategy, out var selectedProxy))
+                    return;
+
                 if (!TryGetTelegramApi(out telegramApiId, out telegramApiHash, out sessionsPath))
                 {
                     Snackbar.Add("请先在【系统设置】中配置全局 Telegram API（ApiId/ApiHash）", Severity.Error);
@@ -209,8 +470,20 @@
                     return;
                 }
 
-                accountId = Random.Shared.Next(1, int.MaxValue);
-                var result = await AccountService.StartLoginAsync(accountId, phoneNumber);
+                accountId = await ResolveLoginIdAsync();
+                var proxyState = await LoginProxy.PrepareAsync(
+                    accountId,
+                    selectedStrategy,
+                    selectedProxy,
+                    _pageCts.Token);
+                await LoginProxy.QuiesceExistingAccountAsync(
+                    accountId,
+                    phoneNumber,
+                    _pageCts.Token);
+                var result = await AccountService.StartLoginAsync(
+                    accountId,
+                    phoneNumber,
+                    proxyState.Resolution);
 
                 if (result.Success)
                 {
@@ -235,7 +508,7 @@
                 Snackbar.Add(result.Message ?? "发送验证码失败", Severity.Error);
                 if (accountId != 0)
                 {
-                    try { await AccountService.ReleaseClientAsync(accountId); } catch { }
+                    await CleanupLoginSessionAsync(accountId);
                     accountId = 0;
                 }
                 return;
@@ -305,7 +578,7 @@
             Snackbar.Add($"操作失败：{ex.Message}", Severity.Error);
             if (currentStep == LoginStep.Phone && accountId != 0)
             {
-                try { await AccountService.ReleaseClientAsync(accountId); } catch { }
+                await CleanupLoginSessionAsync(accountId);
                 accountId = 0;
             }
         }
@@ -340,6 +613,24 @@
         }
     }
 
+    private async Task<int> ResolveLoginIdAsync()
+    {
+        int loginId;
+        do
+        {
+            loginId = Random.Shared.Next(1, int.MaxValue);
+        }
+        while (LoginProxy.HasState(loginId)
+               || await AccountManagement.GetAccountAsync(loginId) != null);
+        return loginId;
+    }
+
+    private async Task CleanupLoginSessionAsync(int loginId)
+    {
+        await AccountService.ReleaseClientStrictAsync(loginId);
+        await LoginProxy.AbandonAsync(loginId, CancellationToken.None);
+    }
+
     private enum LoginStep
     {
         Phone = 0,
@@ -348,37 +639,40 @@
         Done = 3
     }
 
-    private async Task SaveAccount(TelegramPanel.Core.Models.AccountInfo accountInfo)
+    private async Task SaveAccount(AccountInfo accountInfo)
     {
+        var loginId = accountId;
+        Account? stagedAccount = null;
         try
         {
+            if (loginId <= 0 || !LoginProxy.HasState(loginId))
+                throw new InvalidOperationException("登录代理会话已失效，请重新发送验证码");
+
             var phoneDigits = TelegramPanel.Core.Utils.PhoneNumberFormatter.NormalizeToDigits(accountInfo.Phone);
             if (string.IsNullOrWhiteSpace(phoneDigits))
-            {
-                Snackbar.Add("手机号无效，无法保存账号", Severity.Error);
-                return;
-            }
+                throw new InvalidOperationException("手机号无效，无法保存账号");
 
             // 检查账号是否已存在
             var existingAccount = await AccountManagement.GetAccountByPhoneAsync(phoneDigits);
 
             if (existingAccount != null)
             {
-                // 更新现有账号
+                // 登录授权成功后仍先保持停用，只有同一路由绑定完成才允许启用。
+                existingAccount.SessionPath = System.IO.Path.Combine(sessionsPath, $"{phoneDigits}.session");
+                existingAccount.UserId = accountInfo.TelegramUserId;
                 existingAccount.Username = accountInfo.Username;
                 existingAccount.Nickname = BuildNickname(accountInfo);
-                existingAccount.IsActive = true;
+                existingAccount.IsActive = false;
                 existingAccount.ApiId = telegramApiId;
                 existingAccount.ApiHash = telegramApiHash;
                 existingAccount.LastSyncAt = DateTime.UtcNow;
                 existingAccount.LastLoginAt = DateTime.UtcNow;
                 await AccountManagement.UpdateAccountAsync(existingAccount);
-
-                Snackbar.Add("账号信息已更新", Severity.Success);
+                stagedAccount = existingAccount;
             }
             else
             {
-                // 创建新账号
+                // 新账号同样先以停用状态落库，避免后台任务抢先直连。
                 var account = new Account
                 {
                     Phone = phoneDigits,
@@ -388,15 +682,19 @@
                     SessionPath = System.IO.Path.Combine(sessionsPath, $"{phoneDigits}.session"),
                     ApiId = telegramApiId,
                     ApiHash = telegramApiHash,
-                    IsActive = true,
+                    IsActive = false,
                     CreatedAt = DateTime.UtcNow,
                     LastSyncAt = DateTime.UtcNow,
                     LastLoginAt = DateTime.UtcNow
                 };
 
-                await AccountManagement.CreateAccountAsync(account);
-                Snackbar.Add("账号已保存到数据库", Severity.Success);
+                stagedAccount = await AccountManagement.CreateAccountAsync(account);
             }
+
+            await LoginProxy.CompleteAsync(
+                loginId,
+                stagedAccount.Id,
+                _pageCts.Token);
 
             // 设置显示信息
             username = accountInfo.Username;
@@ -404,26 +702,42 @@
 
             // 跳转到完成步骤
             currentStep = LoginStep.Done;
+            Snackbar.Add(
+                existingAccount == null ? "账号已保存并绑定登录代理" : "账号信息和登录代理已更新",
+                Severity.Success);
 
-            if (accountId != 0)
+            try
             {
-                try
-                {
-                    await AccountService.ReleaseClientAsync(accountId);
-                }
-                catch
-                {
-                    // 忽略释放失败
-                }
+                await AccountService.ReleaseClientAsync(loginId);
             }
+            catch
+            {
+                // 正式绑定和启用已经提交，临时客户端清理失败不能改写登录结果。
+            }
+            accountId = 0;
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"保存账号失败：{ex.Message}", Severity.Error);
+            if (stagedAccount != null)
+            {
+                try
+                {
+                    await AccountManagement.SetAccountActiveStatusAsync(stagedAccount.Id, false);
+                }
+                catch
+                {
+                    // 协调器也会尽力保持停用；此处不覆盖原始绑定错误。
+                }
+            }
+
+            await CleanupLoginSessionAsync(loginId);
+            accountId = 0;
+            currentStep = LoginStep.Phone;
+            Snackbar.Add($"Telegram 登录成功，但代理绑定失败，账号已保持停用：{ex.Message}", Severity.Error);
         }
     }
 
-    private static string? BuildNickname(TelegramPanel.Core.Models.AccountInfo accountInfo)
+    private static string? BuildNickname(AccountInfo accountInfo)
     {
         var first = accountInfo.FirstName?.Trim();
         var last = accountInfo.LastName?.Trim();

@@ -1,7 +1,5 @@
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using System.Text.Json;
 
 namespace TelegramPanel.Web.Services;
 
@@ -13,22 +11,14 @@ public sealed record PersistentStoragePaths(
     string ConnectionString);
 
 /// <summary>
-/// 在数据库和后台服务启动前固定持久化路径，并兼容恢复旧版自更新目录中的数据。
-/// 所有恢复都保留来源；已有业务数据或用户凭据不会被覆盖。
+/// 在数据库和后台服务启动前固定持久化路径，并兼容迁移旧版自更新目录中的数据。
+/// SQLite 使用在线备份生成一致快照；迁移不删除旧数据，异常时直接阻止启动。
 /// </summary>
 public static class PersistentStorageBootstrapper
 {
     private const string DefaultDatabaseName = "telegram_panel.db";
-    private const string LegacyDatabaseName = "telegram-panel.db";
     private const string DefaultCredentialsName = "admin_auth.json";
     private const string DefaultSessionsName = "sessions";
-    private static readonly string[] SqliteSidecarSuffixes = ["-wal", "-shm", "-journal"];
-    private static readonly StringComparer PathComparer = OperatingSystem.IsWindows()
-        ? StringComparer.OrdinalIgnoreCase
-        : StringComparer.Ordinal;
-    private static readonly StringComparison PathComparison = OperatingSystem.IsWindows()
-        ? StringComparison.OrdinalIgnoreCase
-        : StringComparison.Ordinal;
 
     public static PersistentStoragePaths Initialize(
         IConfiguration configuration,
@@ -59,18 +49,17 @@ public static class PersistentStorageBootstrapper
             DefaultSessionsName);
 
         var legacyBases = EnumerateLegacyBases(environment.ContentRootPath, writableRoot).ToList();
-        var databaseCandidates = EnumerateLegacyCandidates(legacyBases, databaseRelativePath)
-            .Concat(EnumerateLegacyCandidates(legacyBases, DefaultDatabaseName))
-            .Concat(EnumerateLegacyCandidates(legacyBases, LegacyDatabaseName));
-        TryMigrateDatabase(databasePath, databaseCandidates, report);
-
-        var credentialCandidates = EnumerateLegacyCandidates(
+        TryMigrateSqliteDatabase(
+            databasePath,
+            EnumerateLegacyCandidates(legacyBases, databaseRelativePath),
+            report);
+        TryMigrateCredentialsFile(
+            credentialsPath,
+            EnumerateLegacyCandidates(
                 legacyBases,
-                ToLegacyRelativePath(credentialsSetting, DefaultCredentialsName))
-            .Concat(EnumerateLegacyCandidates(legacyBases, DefaultCredentialsName));
-        TryMigrateCredentials(credentialsPath, credentialCandidates, configuration, report);
-
-        TryMergeDirectories(
+                ToLegacyRelativePath(credentialsSetting, DefaultCredentialsName)),
+            report);
+        TryMigrateDirectory(
             sessionsPath,
             EnumerateLegacyCandidates(
                 legacyBases,
@@ -129,7 +118,7 @@ public static class PersistentStorageBootstrapper
 
     private static IEnumerable<string> EnumerateLegacyBases(string contentRoot, string writableRoot)
     {
-        var seen = new HashSet<string>(PathComparer);
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var path in EnumerateCandidates())
         {
@@ -150,9 +139,8 @@ public static class PersistentStorageBootstrapper
         IEnumerable<string> EnumerateCandidates()
         {
             yield return contentRoot;
-            yield return writableRoot;
 
-            if (OperatingSystem.IsLinux() && Directory.Exists("/app"))
+            if (Directory.Exists("/app"))
                 yield return "/app";
 
             var parent = Directory.GetParent(Path.GetFullPath(contentRoot))?.FullName;
@@ -162,7 +150,7 @@ public static class PersistentStorageBootstrapper
                     yield return directory;
             }
 
-            if (!string.Equals(parent, writableRoot, PathComparison))
+            if (!string.Equals(parent, writableRoot, StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var directory in EnumerateVersionDirectories(writableRoot))
                     yield return directory;
@@ -212,7 +200,7 @@ public static class PersistentStorageBootstrapper
         }
     }
 
-    private static void TryMigrateDatabase(
+    private static void TryMigrateSqliteDatabase(
         string targetPath,
         IEnumerable<string> candidates,
         Action<string>? report)
@@ -220,529 +208,182 @@ public static class PersistentStorageBootstrapper
         if (string.Equals(targetPath, ":memory:", StringComparison.OrdinalIgnoreCase))
             return;
 
-        var targetExists = File.Exists(targetPath);
-        var target = InspectDatabase(targetPath);
-        if (targetExists)
+        var targetArtifactsExist = EnumerateSqliteArtifacts(targetPath).Any(File.Exists);
+        if (File.Exists(targetPath) && TryValidateSqliteDatabase(targetPath, out _))
+            return;
+
+        string? sourcePath = null;
+        var invalidCandidates = new List<string>();
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            if (!target.IsValid && new FileInfo(targetPath).Length > 0)
+            if (SamePath(candidate, targetPath) || !File.Exists(candidate))
+                continue;
+
+            if (TryValidateSqliteDatabase(candidate, out var candidateError))
             {
-                report?.Invoke($"现有数据库非空且无法安全确认业务数据，已保留且不自动覆盖：{targetPath}");
-                return;
+                sourcePath = candidate;
+                break;
             }
 
-            if (target.HasBusinessData)
-                return;
+            invalidCandidates.Add($"{candidate}（{candidateError}）");
+            report?.Invoke($"跳过不可用的旧数据库候选：{candidate}；{candidateError}");
         }
 
-        var rankedCandidates = candidates
-            .Distinct(PathComparer)
-            .Where(path => !SamePath(path, targetPath) && File.Exists(path))
-            .Select(InspectDatabase)
-            .Where(candidate => candidate.IsValid && candidate.HasAccountsTable)
-            .Where(candidate => candidate.AccountCount > 0)
-            .OrderByDescending(candidate => candidate.AccountCount)
-            .ThenByDescending(candidate => candidate.LastWriteTimeUtc)
-            .ToList();
-
-        foreach (var source in rankedCandidates)
+        if (string.IsNullOrWhiteSpace(sourcePath))
         {
-            try
+            if (invalidCandidates.Count > 0)
             {
-                var backupPath = RestoreDatabase(source, targetPath, targetExists);
-                report?.Invoke(
-                    backupPath == null
-                        ? $"已从旧版本目录恢复数据库（Accounts={source.AccountCount}）：{source.Path} -> {targetPath}"
-                        : $"已备份空数据库并恢复旧数据（Accounts={source.AccountCount}）：{backupPath}；来源={source.Path}");
-                return;
-            }
-            catch (Exception ex)
-            {
-                report?.Invoke($"恢复数据库失败：{source.Path} -> {targetPath}；{ex.Message}");
-            }
-        }
-    }
-
-    private static DatabaseInspection InspectDatabase(string path)
-    {
-        if (!File.Exists(path))
-            return DatabaseInspection.Invalid(path);
-
-        var lastWriteTimeUtc = GetDatabaseLastWriteTimeUtc(path);
-        try
-        {
-            var builder = new SqliteConnectionStringBuilder
-            {
-                DataSource = path,
-                Mode = SqliteOpenMode.ReadOnly,
-                Cache = SqliteCacheMode.Private,
-                Pooling = false,
-                DefaultTimeout = 5
-            };
-
-            using var connection = new SqliteConnection(builder.ToString());
-            connection.Open();
-
-            using (var checkCommand = connection.CreateCommand())
-            {
-                checkCommand.CommandText = "PRAGMA quick_check;";
-                using var reader = checkCommand.ExecuteReader();
-                var receivedResult = false;
-                while (reader.Read())
-                {
-                    receivedResult = true;
-                    if (!string.Equals(reader.GetString(0), "ok", StringComparison.OrdinalIgnoreCase))
-                        return DatabaseInspection.Invalid(path, lastWriteTimeUtc);
-                }
-
-                if (!receivedResult)
-                    return DatabaseInspection.Invalid(path, lastWriteTimeUtc);
+                throw new InvalidDataException(
+                    "找到旧数据库候选，但全部未通过完整性校验："
+                    + string.Join("；", invalidCandidates));
             }
 
-            using var tableCommand = connection.CreateCommand();
-            tableCommand.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'Accounts' COLLATE NOCASE;";
-            var hasAccountsTable = Convert.ToInt64(tableCommand.ExecuteScalar()) > 0;
-            var accountCount = 0L;
-            if (hasAccountsTable)
+            if (targetArtifactsExist)
             {
-                using var countCommand = connection.CreateCommand();
-                countCommand.CommandText = "SELECT COUNT(*) FROM \"Accounts\";";
-                accountCount = Convert.ToInt64(countCommand.ExecuteScalar());
+                _ = TryValidateSqliteDatabase(targetPath, out var validationError);
+                throw new InvalidDataException(
+                    $"持久化数据库不可用，且未找到可恢复的旧数据库：{targetPath}；{validationError}");
             }
 
-            var hasBusinessData = accountCount > 0 || ContainsRowsInOtherBusinessTables(connection);
-            return new DatabaseInspection(
-                path,
-                true,
-                true,
-                accountCount,
-                hasBusinessData,
-                lastWriteTimeUtc);
-        }
-        catch
-        {
-            return DatabaseInspection.Invalid(path, lastWriteTimeUtc);
-        }
-    }
-
-    private static bool ContainsRowsInOtherBusinessTables(SqliteConnection connection)
-    {
-        var tableNames = new List<string>();
-        using (var tableCommand = connection.CreateCommand())
-        {
-            tableCommand.CommandText = "SELECT name FROM sqlite_master WHERE type = 'table';";
-            using var reader = tableCommand.ExecuteReader();
-            while (reader.Read())
-            {
-                var tableName = reader.GetString(0);
-                if (string.Equals(tableName, "Accounts", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(tableName, "__EFMigrationsHistory", StringComparison.OrdinalIgnoreCase)
-                    || tableName.StartsWith("sqlite_", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                tableNames.Add(tableName);
-            }
+            return;
         }
 
-        foreach (var tableName in tableNames)
-        {
-            using var rowCommand = connection.CreateCommand();
-            rowCommand.CommandText =
-                $"SELECT EXISTS(SELECT 1 FROM \"{tableName.Replace("\"", "\"\"")}\" LIMIT 1);";
-            if (Convert.ToInt64(rowCommand.ExecuteScalar()) > 0)
-                return true;
-        }
-
-        return false;
-    }
-
-    private static string? RestoreDatabase(
-        DatabaseInspection source,
-        string targetPath,
-        bool targetExists)
-    {
-        var targetDirectory = Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory;
-        Directory.CreateDirectory(targetDirectory);
+        var directory = Path.GetDirectoryName(targetPath) ?? Directory.GetCurrentDirectory();
+        Directory.CreateDirectory(directory);
         var temporaryPath = Path.Combine(
-            targetDirectory,
-            $".{Path.GetFileName(targetPath)}.restore-{Guid.NewGuid():N}.tmp");
+            directory,
+            $".{Path.GetFileName(targetPath)}.migrating-{Guid.NewGuid():N}");
 
         try
         {
-            CreateDatabaseSnapshot(source.Path, temporaryPath);
-            var restored = InspectDatabase(temporaryPath);
-            if (!restored.IsValid
-                || !restored.HasAccountsTable
-                || restored.AccountCount != source.AccountCount)
-            {
-                throw new InvalidDataException("数据库恢复快照校验失败");
-            }
-
-            string? backupPath = null;
-            List<(string Source, string Backup)> movedSidecars = [];
-            if (targetExists)
-            {
-                backupPath = CreateBackupPath(targetPath);
-                BackupExistingDatabase(targetPath, backupPath);
-                movedSidecars = MoveSqliteSidecarsToBackup(targetPath, backupPath);
-            }
-
-            try
-            {
-                File.Move(temporaryPath, targetPath, overwrite: targetExists);
-            }
-            catch
-            {
-                RestoreMovedSidecars(movedSidecars);
-                throw;
-            }
-
-            return backupPath;
+            CreateValidatedSqliteSnapshot(sourcePath, temporaryPath);
+            PromoteSqliteSnapshot(temporaryPath, targetPath);
+            report?.Invoke($"已从旧版本目录恢复持久化数据库：{sourcePath} -> {targetPath}");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"恢复持久化数据库失败：{sourcePath} -> {targetPath}；{ex.Message}",
+                ex);
         }
         finally
         {
-            TryDeleteFile(temporaryPath);
+            TryDeleteTemporaryFile(temporaryPath);
         }
     }
 
-    private static void CreateDatabaseSnapshot(string sourcePath, string destinationPath)
-    {
-        var sourceBuilder = new SqliteConnectionStringBuilder
-        {
-            DataSource = sourcePath,
-            Mode = SqliteOpenMode.ReadOnly,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-            DefaultTimeout = 5
-        };
-        var destinationBuilder = new SqliteConnectionStringBuilder
-        {
-            DataSource = destinationPath,
-            Mode = SqliteOpenMode.ReadWriteCreate,
-            Cache = SqliteCacheMode.Private,
-            Pooling = false,
-            DefaultTimeout = 5
-        };
-
-        using var source = new SqliteConnection(sourceBuilder.ToString());
-        using var destination = new SqliteConnection(destinationBuilder.ToString());
-        source.Open();
-        destination.Open();
-        source.BackupDatabase(destination);
-    }
-
-    private static void BackupExistingDatabase(string sourcePath, string destinationPath)
-    {
-        if (new FileInfo(sourcePath).Length == 0)
-        {
-            File.Copy(sourcePath, destinationPath, overwrite: false);
-            return;
-        }
-
-        if (InspectDatabase(sourcePath).IsValid)
-        {
-            CreateDatabaseSnapshot(sourcePath, destinationPath);
-            return;
-        }
-
-        // 仅零字节目标会走到这里；非零损坏库在恢复判定阶段已被拒绝覆盖。
-        File.Copy(sourcePath, destinationPath, overwrite: false);
-    }
-
-    private static List<(string Source, string Backup)> MoveSqliteSidecarsToBackup(
-        string targetPath,
-        string backupPath)
-    {
-        var moved = new List<(string Source, string Backup)>();
-        try
-        {
-            foreach (var suffix in SqliteSidecarSuffixes)
-            {
-                var source = targetPath + suffix;
-                if (!File.Exists(source))
-                    continue;
-
-                var backup = backupPath + ".source" + suffix;
-                File.Move(source, backup, overwrite: false);
-                moved.Add((source, backup));
-            }
-
-            return moved;
-        }
-        catch
-        {
-            RestoreMovedSidecars(moved);
-            throw;
-        }
-    }
-
-    private static void RestoreMovedSidecars(IEnumerable<(string Source, string Backup)> movedSidecars)
-    {
-        foreach (var (source, backup) in movedSidecars.Reverse())
-        {
-            try
-            {
-                if (File.Exists(backup) && !File.Exists(source))
-                    File.Move(backup, source, overwrite: false);
-            }
-            catch
-            {
-                // 原始数据库快照已经保留；此处只做失败路径的尽力回滚。
-            }
-        }
-    }
-
-    private static DateTime GetDatabaseLastWriteTimeUtc(string path)
-    {
-        var lastWriteTimeUtc = File.GetLastWriteTimeUtc(path);
-        foreach (var suffix in SqliteSidecarSuffixes)
-        {
-            var sidecar = path + suffix;
-            if (File.Exists(sidecar))
-                lastWriteTimeUtc = Max(lastWriteTimeUtc, File.GetLastWriteTimeUtc(sidecar));
-        }
-
-        return lastWriteTimeUtc;
-    }
-
-    private static void TryMigrateCredentials(
+    private static void TryMigrateCredentialsFile(
         string targetPath,
         IEnumerable<string> candidates,
-        IConfiguration configuration,
         Action<string>? report)
     {
-        var initialUsername = (configuration["AdminAuth:InitialUsername"] ?? "tgpanel").Trim();
-        var initialPassword = (configuration["AdminAuth:InitialPassword"] ?? "tgpanel123").Trim();
         var targetExists = File.Exists(targetPath);
-        var target = InspectCredentials(targetPath, initialUsername, initialPassword);
-
-        if (targetExists && (!target.IsValid || !target.IsGeneratedDefault))
+        if (targetExists && TryValidateCredentialsFile(targetPath, out _))
             return;
 
-        var rankedCandidates = candidates
-            .Distinct(PathComparer)
-            .Where(path => !SamePath(path, targetPath) && File.Exists(path))
-            .Select(path => InspectCredentials(path, initialUsername, initialPassword))
-            .Where(candidate => candidate.IsValid)
-            .Where(candidate => !targetExists || candidate.IsUserModified)
-            .OrderByDescending(candidate => candidate.IsUserModified)
-            .ThenByDescending(candidate => candidate.UpdatedAtUtc)
-            .ThenByDescending(candidate => candidate.LastWriteTimeUtc)
-            .ToList();
-
-        foreach (var source in rankedCandidates)
+        string? sourcePath = null;
+        var invalidCandidates = new List<string>();
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            try
+            if (SamePath(candidate, targetPath) || !File.Exists(candidate))
+                continue;
+
+            if (TryValidateCredentialsFile(candidate, out var candidateError))
             {
-                var backupPath = RestoreRegularFile(source.Path, targetPath, targetExists);
-                report?.Invoke(
-                    backupPath == null
-                        ? $"已从旧版本目录恢复后台凭据：{source.Path} -> {targetPath}"
-                        : $"已备份新生成的默认凭据并恢复用户凭据：{backupPath}；来源={source.Path}");
-                return;
+                sourcePath = candidate;
+                break;
             }
-            catch (Exception ex)
-            {
-                report?.Invoke($"恢复后台凭据失败：{source.Path} -> {targetPath}；{ex.Message}");
-            }
+
+            invalidCandidates.Add($"{candidate}（{candidateError}）");
+            report?.Invoke($"跳过不可用的旧后台凭据候选：{candidate}；{candidateError}");
         }
-    }
 
-    private static CredentialInspection InspectCredentials(
-        string path,
-        string initialUsername,
-        string initialPassword)
-    {
-        if (!File.Exists(path))
-            return CredentialInspection.Invalid(path);
-
-        var lastWriteTimeUtc = File.GetLastWriteTimeUtc(path);
-        try
+        if (string.IsNullOrWhiteSpace(sourcePath))
         {
-            using var document = JsonDocument.Parse(File.ReadAllText(path));
-            var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object
-                || !TryGetString(root, "Username", out var username)
-                || !TryGetString(root, "SaltBase64", out var saltBase64)
-                || !TryGetString(root, "HashBase64", out var hashBase64)
-                || !TryGetInt32(root, "Iterations", out var iterations)
-                || !TryGetBoolean(root, "MustChangePassword", out var mustChangePassword)
-                || string.IsNullOrWhiteSpace(username)
-                || iterations is < 1 or > 10_000_000)
+            if (invalidCandidates.Count > 0)
             {
-                return CredentialInspection.Invalid(path, lastWriteTimeUtc);
+                throw new InvalidDataException(
+                    "找到旧后台凭据候选，但全部未通过校验："
+                    + string.Join("；", invalidCandidates));
             }
 
-            var salt = Convert.FromBase64String(saltBase64);
-            var expectedHash = Convert.FromBase64String(hashBase64);
-            if (salt.Length < 8 || expectedHash.Length < 16)
-                return CredentialInspection.Invalid(path, lastWriteTimeUtc);
-
-            var isGeneratedDefault = false;
-            if (mustChangePassword
-                && string.Equals(username, initialUsername, StringComparison.Ordinal)
-                && !string.IsNullOrEmpty(initialPassword))
+            if (targetExists)
             {
-                var actualHash = Rfc2898DeriveBytes.Pbkdf2(
-                    Encoding.UTF8.GetBytes(initialPassword),
-                    salt,
-                    iterations,
-                    HashAlgorithmName.SHA256,
-                    expectedHash.Length);
-                isGeneratedDefault = CryptographicOperations.FixedTimeEquals(expectedHash, actualHash);
+                _ = TryValidateCredentialsFile(targetPath, out var validationError);
+                throw new InvalidDataException(
+                    $"持久化后台凭据不可用，且未找到可恢复的旧凭据：{targetPath}；{validationError}");
             }
 
-            var updatedAtUtc = TryGetDateTime(root, "UpdatedAtUtc", out var parsedUpdatedAt)
-                ? parsedUpdatedAt.ToUniversalTime()
-                : lastWriteTimeUtc;
-            return new CredentialInspection(
-                path,
-                true,
-                !mustChangePassword,
-                isGeneratedDefault,
-                updatedAtUtc,
-                lastWriteTimeUtc);
+            return;
         }
-        catch
-        {
-            return CredentialInspection.Invalid(path, lastWriteTimeUtc);
-        }
-    }
 
-    private static string? RestoreRegularFile(string sourcePath, string targetPath, bool targetExists)
-    {
-        var targetDirectory = Path.GetDirectoryName(targetPath) ?? AppContext.BaseDirectory;
-        Directory.CreateDirectory(targetDirectory);
+        var directory = Path.GetDirectoryName(targetPath) ?? Directory.GetCurrentDirectory();
+        Directory.CreateDirectory(directory);
         var temporaryPath = Path.Combine(
-            targetDirectory,
-            $".{Path.GetFileName(targetPath)}.restore-{Guid.NewGuid():N}.tmp");
+            directory,
+            $".{Path.GetFileName(targetPath)}.migrating-{Guid.NewGuid():N}");
 
         try
         {
             File.Copy(sourcePath, temporaryPath, overwrite: false);
-            string? backupPath = null;
-            if (targetExists)
-            {
-                backupPath = CreateBackupPath(targetPath);
-                File.Copy(targetPath, backupPath, overwrite: false);
-                File.Move(temporaryPath, targetPath, overwrite: true);
-            }
-            else
-            {
-                File.Move(temporaryPath, targetPath, overwrite: false);
-            }
+            if (!TryValidateCredentialsFile(temporaryPath, out var validationError))
+                throw new InvalidDataException($"后台凭据快照校验失败：{validationError}");
 
-            return backupPath;
+            PromoteFileSnapshot(temporaryPath, targetPath);
+            report?.Invoke($"已从旧版本目录恢复后台凭据：{sourcePath} -> {targetPath}");
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"恢复后台凭据失败：{sourcePath} -> {targetPath}；{ex.Message}",
+                ex);
         }
         finally
         {
-            TryDeleteFile(temporaryPath);
+            TryDeleteTemporaryFile(temporaryPath);
         }
     }
 
-    private static bool TryGetString(JsonElement root, string name, out string value)
-    {
-        value = string.Empty;
-        if (!TryGetProperty(root, name, out var property) || property.ValueKind != JsonValueKind.String)
-            return false;
-
-        value = property.GetString() ?? string.Empty;
-        return true;
-    }
-
-    private static bool TryGetInt32(JsonElement root, string name, out int value)
-    {
-        value = 0;
-        return TryGetProperty(root, name, out var property)
-            && property.ValueKind == JsonValueKind.Number
-            && property.TryGetInt32(out value);
-    }
-
-    private static bool TryGetBoolean(JsonElement root, string name, out bool value)
-    {
-        value = false;
-        if (!TryGetProperty(root, name, out var property)
-            || (property.ValueKind != JsonValueKind.True && property.ValueKind != JsonValueKind.False))
-        {
-            return false;
-        }
-
-        value = property.GetBoolean();
-        return true;
-    }
-
-    private static bool TryGetDateTime(JsonElement root, string name, out DateTime value)
-    {
-        value = default;
-        return TryGetProperty(root, name, out var property)
-            && property.ValueKind == JsonValueKind.String
-            && property.TryGetDateTime(out value);
-    }
-
-    private static bool TryGetProperty(JsonElement root, string name, out JsonElement value)
-    {
-        if (root.TryGetProperty(name, out value))
-            return true;
-
-        foreach (var property in root.EnumerateObject())
-        {
-            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
-            {
-                value = property.Value;
-                return true;
-            }
-        }
-
-        value = default;
-        return false;
-    }
-
-    private static void TryMergeDirectories(
+    private static void TryMigrateDirectory(
         string targetPath,
         IEnumerable<string> candidates,
         Action<string>? report)
     {
-        Directory.CreateDirectory(targetPath);
         var expandedCandidates = candidates
             .SelectMany(path => new[] { path, $"{path}.before-persistent" })
-            .Distinct(PathComparer);
+            .Distinct(StringComparer.OrdinalIgnoreCase);
 
         foreach (var sourcePath in expandedCandidates)
         {
-            if (SamePath(sourcePath, targetPath) || !Directory.Exists(sourcePath))
+            if (SamePath(sourcePath, targetPath)
+                || !Directory.Exists(sourcePath)
+                || !DirectoryHasEntries(sourcePath))
+            {
                 continue;
-
-            try
-            {
-                var copiedCount = CopyDirectoryWithoutOverwrite(sourcePath, targetPath);
-                if (copiedCount > 0)
-                    report?.Invoke($"已从旧版本目录合并 {copiedCount} 个 Session 文件：{sourcePath} -> {targetPath}");
             }
-            catch (Exception ex)
+
+            var copiedFiles = CopyDirectoryWithoutOverwrite(sourcePath, targetPath);
+            if (copiedFiles > 0)
             {
-                report?.Invoke($"合并 Session 失败：{sourcePath} -> {targetPath}；{ex.Message}");
+                report?.Invoke(
+                    $"已从旧版本目录恢复 Session：{sourcePath} -> {targetPath}（{copiedFiles} 个文件）");
             }
         }
+
+        Directory.CreateDirectory(targetPath);
     }
 
     private static int CopyDirectoryWithoutOverwrite(string sourcePath, string targetPath)
     {
-        var copiedCount = 0;
+        Directory.CreateDirectory(targetPath);
+        var copiedFiles = 0;
         foreach (var sourceFile in Directory.EnumerateFiles(sourcePath))
         {
             var targetFile = Path.Combine(targetPath, Path.GetFileName(sourceFile));
-            if (File.Exists(targetFile) || Directory.Exists(targetFile))
-                continue;
-
-            try
+            if (!File.Exists(targetFile))
             {
-                File.Copy(sourceFile, targetFile, overwrite: false);
-                copiedCount++;
-            }
-            catch (IOException) when (File.Exists(targetFile) || Directory.Exists(targetFile))
-            {
-                // 并发创建的目标文件优先，不能被旧 Session 覆盖。
+                CopyFileAtomically(sourceFile, targetFile);
+                copiedFiles++;
             }
         }
 
@@ -752,29 +393,318 @@ public static class PersistentStorageBootstrapper
                 continue;
 
             var targetDirectory = Path.Combine(targetPath, Path.GetFileName(sourceDirectory));
-            if (File.Exists(targetDirectory))
-                continue;
-
             Directory.CreateDirectory(targetDirectory);
-            copiedCount += CopyDirectoryWithoutOverwrite(sourceDirectory, targetDirectory);
+            copiedFiles += CopyDirectoryWithoutOverwrite(sourceDirectory, targetDirectory);
         }
 
-        return copiedCount;
+        return copiedFiles;
     }
 
-    private static string CreateBackupPath(string targetPath)
+    private static bool DirectoryHasEntries(string path)
     {
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff");
-        var basePath = $"{targetPath}.before-storage-recovery-{timestamp}";
-        var candidate = basePath;
-        var sequence = 1;
-        while (File.Exists(candidate) || Directory.Exists(candidate))
-            candidate = $"{basePath}-{sequence++}";
-
-        return candidate;
+        return Directory.Exists(path) && Directory.EnumerateFileSystemEntries(path).Any();
     }
 
-    private static void TryDeleteFile(string path)
+    private static bool SamePath(string left, string right)
+    {
+        try
+        {
+            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void CreateValidatedSqliteSnapshot(string sourcePath, string temporaryPath)
+    {
+        if (!TryValidateSqliteDatabase(sourcePath, out var validationError))
+            throw new InvalidDataException($"旧数据库不可用：{sourcePath}；{validationError}");
+
+        var sourceBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = sourcePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            DefaultTimeout = 5,
+            Pooling = false
+        };
+        var targetBuilder = new SqliteConnectionStringBuilder
+        {
+            DataSource = temporaryPath,
+            Mode = SqliteOpenMode.ReadWriteCreate,
+            Cache = SqliteCacheMode.Private,
+            DefaultTimeout = 5,
+            Pooling = false
+        };
+
+        using (var source = new SqliteConnection(sourceBuilder.ToString()))
+        using (var target = new SqliteConnection(targetBuilder.ToString()))
+        {
+            source.Open();
+            target.Open();
+            source.BackupDatabase(target);
+
+            using var journalMode = target.CreateCommand();
+            journalMode.CommandText = "PRAGMA journal_mode=DELETE;";
+            _ = journalMode.ExecuteScalar();
+        }
+
+        if (!TryValidateSqliteDatabase(temporaryPath, out validationError))
+            throw new InvalidDataException($"数据库快照校验失败：{validationError}");
+
+        using var stream = new FileStream(
+            temporaryPath,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.Read);
+        stream.Flush(flushToDisk: true);
+    }
+
+    private static bool TryValidateSqliteDatabase(string path, out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            if (!File.Exists(path))
+            {
+                error = "文件不存在";
+                return false;
+            }
+
+            if (new FileInfo(path).Length == 0)
+            {
+                error = "文件为空";
+                return false;
+            }
+
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = path,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Private,
+                DefaultTimeout = 5,
+                Pooling = false
+            };
+            using var connection = new SqliteConnection(builder.ToString());
+            connection.Open();
+
+            using (var quickCheck = connection.CreateCommand())
+            {
+                quickCheck.CommandText = "PRAGMA quick_check;";
+                using var reader = quickCheck.ExecuteReader();
+                while (reader.Read())
+                {
+                    var result = reader.IsDBNull(0) ? string.Empty : reader.GetString(0);
+                    if (!string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = $"quick_check 返回：{result}";
+                        return false;
+                    }
+                }
+            }
+
+            using var tableCount = connection.CreateCommand();
+            tableCount.CommandText = """
+                SELECT COUNT(1)
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+                  AND name <> '__EFMigrationsHistory';
+                """;
+            if (Convert.ToInt32(tableCount.ExecuteScalar()) <= 0)
+            {
+                error = "数据库不包含业务表";
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryValidateCredentialsFile(string path, out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            if (!File.Exists(path))
+            {
+                error = "文件不存在";
+                return false;
+            }
+
+            if (new FileInfo(path).Length == 0)
+            {
+                error = "文件为空";
+                return false;
+            }
+
+            using var stream = File.OpenRead(path);
+            using var document = JsonDocument.Parse(stream);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                error = "JSON 根节点不是对象";
+                return false;
+            }
+
+            if (!TryGetStringProperty(root, "Username", out var username)
+                || string.IsNullOrWhiteSpace(username))
+            {
+                error = "缺少有效的 Username";
+                return false;
+            }
+
+            if (!TryGetStringProperty(root, "SaltBase64", out var saltBase64)
+                || !TryDecodeBase64(saltBase64, out var salt)
+                || salt.Length == 0)
+            {
+                error = "SaltBase64 无效";
+                return false;
+            }
+
+            if (!TryGetStringProperty(root, "HashBase64", out var hashBase64)
+                || !TryDecodeBase64(hashBase64, out var hash)
+                || hash.Length == 0)
+            {
+                error = "HashBase64 无效";
+                return false;
+            }
+
+            if (!TryGetInt32Property(root, "Iterations", out var iterations) || iterations <= 0)
+            {
+                error = "Iterations 无效";
+                return false;
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "JSON 格式无效";
+            return false;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool TryGetStringProperty(JsonElement root, string name, out string value)
+    {
+        if (root.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.String)
+        {
+            value = property.GetString() ?? string.Empty;
+            return true;
+        }
+
+        value = string.Empty;
+        return false;
+    }
+
+    private static bool TryGetInt32Property(JsonElement root, string name, out int value)
+    {
+        if (root.TryGetProperty(name, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetInt32(out value))
+        {
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private static bool TryDecodeBase64(string value, out byte[] decoded)
+    {
+        try
+        {
+            decoded = Convert.FromBase64String(value);
+            return true;
+        }
+        catch (FormatException)
+        {
+            decoded = Array.Empty<byte>();
+            return false;
+        }
+    }
+
+    private static void PromoteSqliteSnapshot(string temporaryPath, string targetPath)
+    {
+        var backupSuffix = $".invalid-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";
+        var movedArtifacts = new List<(string Original, string Backup)>();
+
+        try
+        {
+            foreach (var artifact in EnumerateSqliteArtifacts(targetPath))
+            {
+                if (!File.Exists(artifact))
+                    continue;
+
+                var backup = artifact + backupSuffix;
+                File.Move(artifact, backup, overwrite: false);
+                movedArtifacts.Add((artifact, backup));
+            }
+
+            File.Move(temporaryPath, targetPath, overwrite: false);
+        }
+        catch
+        {
+            for (var i = movedArtifacts.Count - 1; i >= 0; i--)
+            {
+                var (original, backup) = movedArtifacts[i];
+                if (!File.Exists(original) && File.Exists(backup))
+                    File.Move(backup, original, overwrite: false);
+            }
+
+            throw;
+        }
+    }
+
+    private static void PromoteFileSnapshot(string temporaryPath, string targetPath)
+    {
+        string? backupPath = null;
+        try
+        {
+            if (File.Exists(targetPath))
+            {
+                backupPath = targetPath
+                    + $".invalid-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}";
+                File.Move(targetPath, backupPath, overwrite: false);
+            }
+
+            File.Move(temporaryPath, targetPath, overwrite: false);
+        }
+        catch
+        {
+            if (!File.Exists(targetPath)
+                && !string.IsNullOrWhiteSpace(backupPath)
+                && File.Exists(backupPath))
+            {
+                File.Move(backupPath, targetPath, overwrite: false);
+            }
+
+            throw;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateSqliteArtifacts(string databasePath)
+    {
+        yield return databasePath;
+        yield return databasePath + "-wal";
+        yield return databasePath + "-shm";
+        yield return databasePath + "-journal";
+    }
+
+    private static void TryDeleteTemporaryFile(string path)
     {
         try
         {
@@ -783,45 +713,26 @@ public static class PersistentStorageBootstrapper
         }
         catch
         {
-            // 临时文件清理失败不应掩盖原始恢复结果。
+            // 临时文件清理失败不覆盖原始迁移异常。
         }
     }
 
-    private static bool SamePath(string left, string right)
+    private static void CopyFileAtomically(string sourcePath, string targetPath)
     {
+        var directory = Path.GetDirectoryName(targetPath) ?? Directory.GetCurrentDirectory();
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(targetPath)}.migrating-{Guid.NewGuid():N}");
+
         try
         {
-            return string.Equals(Path.GetFullPath(left), Path.GetFullPath(right), PathComparison);
+            File.Copy(sourcePath, temporaryPath, overwrite: false);
+            File.Move(temporaryPath, targetPath, overwrite: false);
         }
-        catch
+        finally
         {
-            return false;
+            TryDeleteTemporaryFile(temporaryPath);
         }
-    }
-
-    private static DateTime Max(DateTime left, DateTime right) => left >= right ? left : right;
-
-    private sealed record DatabaseInspection(
-        string Path,
-        bool IsValid,
-        bool HasAccountsTable,
-        long AccountCount,
-        bool HasBusinessData,
-        DateTime LastWriteTimeUtc)
-    {
-        public static DatabaseInspection Invalid(string path, DateTime lastWriteTimeUtc = default) =>
-            new(path, false, false, 0, false, lastWriteTimeUtc);
-    }
-
-    private sealed record CredentialInspection(
-        string Path,
-        bool IsValid,
-        bool IsUserModified,
-        bool IsGeneratedDefault,
-        DateTime UpdatedAtUtc,
-        DateTime LastWriteTimeUtc)
-    {
-        public static CredentialInspection Invalid(string path, DateTime lastWriteTimeUtc = default) =>
-            new(path, false, false, false, default, lastWriteTimeUtc);
     }
 }

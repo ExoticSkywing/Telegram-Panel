@@ -8,14 +8,19 @@ namespace TelegramPanel.Core.Interfaces;
 public interface IAccountService
 {
     /// <summary>
-    /// 发起手机号登录（发送验证码）
+    /// 使用登录前已明确选择的路由发起手机号登录（发送验证码）。
     /// </summary>
-    Task<LoginResult> StartLoginAsync(int accountId, string phone);
+    Task<LoginResult> StartLoginAsync(
+        int accountId,
+        string phone,
+        AccountProxyResolution proxyResolution);
 
     /// <summary>
-    /// 发起二维码登录。
+    /// 使用登录前已明确选择的路由发起二维码登录。
     /// </summary>
-    Task<QrLoginResult> StartQrLoginAsync(int loginId);
+    Task<QrLoginResult> StartQrLoginAsync(
+        int loginId,
+        AccountProxyResolution proxyResolution);
 
     /// <summary>
     /// 查询二维码登录状态。
@@ -31,6 +36,11 @@ public interface IAccountService
     /// 取消二维码登录并释放临时会话。
     /// </summary>
     Task CancelQrLoginAsync(int loginId);
+
+    /// <summary>
+    /// 严格取消二维码登录；无法确认旧连接断开时保留会话并报告失败。
+    /// </summary>
+    Task CancelQrLoginStrictAsync(int loginId);
 
     /// <summary>
     /// 释放已完成的二维码登录内存状态，保留已经迁移完成的正式 session 文件。
@@ -71,6 +81,11 @@ public interface IAccountService
     /// 释放并移除指定账号的 Telegram 客户端（用于避免 session 文件长期被占用）。
     /// </summary>
     Task ReleaseClientAsync(int accountId);
+
+    /// <summary>
+    /// 严格释放客户端；无法确认旧连接已断开时向调用方报告失败。
+    /// </summary>
+    Task ReleaseClientStrictAsync(int accountId);
 }
 
 /// <summary>

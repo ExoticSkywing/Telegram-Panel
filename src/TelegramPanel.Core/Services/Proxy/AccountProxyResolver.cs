@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Models;
@@ -13,10 +14,14 @@ namespace TelegramPanel.Core.Services.Proxy;
 public sealed class AccountProxyResolver : IAccountProxyResolver
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IConfiguration _configuration;
 
-    public AccountProxyResolver(IServiceScopeFactory scopeFactory)
+    public AccountProxyResolver(
+        IServiceScopeFactory scopeFactory,
+        IConfiguration configuration)
     {
         _scopeFactory = scopeFactory;
+        _configuration = configuration;
     }
 
     public async Task<AccountProxyResolution> ResolveAsync(
@@ -24,7 +29,8 @@ public sealed class AccountProxyResolver : IAccountProxyResolver
         CancellationToken cancellationToken = default)
     {
         if (accountId <= 0)
-            return new AccountProxyResolution(null, true);
+            throw new ArgumentOutOfRangeException(
+                nameof(accountId), "必须提供已入库账号 ID，禁止为未知账号推断出口");
 
         await using var scope = _scopeFactory.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
@@ -34,9 +40,13 @@ public sealed class AccountProxyResolver : IAccountProxyResolver
             .FirstOrDefaultAsync(x => x.Id == accountId, cancellationToken);
 
         if (account == null)
-            return new AccountProxyResolution(null, true);
+            throw new KeyNotFoundException($"账号 {accountId} 不存在，已阻止推断代理出口");
         if (!account.ProxyId.HasValue)
-            return new AccountProxyResolution(null, account.UseGlobalProxy);
+        {
+            return account.UseGlobalProxy
+                ? ResolveGlobalProxy()
+                : new AccountProxyResolution(null, false);
+        }
         if (account.Proxy is not { IsEnabled: true } proxy)
             throw new InvalidOperationException($"账号 {accountId} 绑定的代理不可用，已阻止降级为直连");
 
@@ -44,6 +54,11 @@ public sealed class AccountProxyResolver : IAccountProxyResolver
             BuildConnectionOptions(proxy, $"tg_account_{accountId}"),
             false);
     }
+
+    private AccountProxyResolution ResolveGlobalProxy() =>
+        new(
+            GlobalTelegramProxyConfiguration.BuildRequired(_configuration),
+            false);
 
     public static ProxyConnectionOptions BuildConnectionOptions(
         OutboundProxy proxy,

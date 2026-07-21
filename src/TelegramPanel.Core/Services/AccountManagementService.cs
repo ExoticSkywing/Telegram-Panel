@@ -154,11 +154,13 @@ public class AccountManagementService
         int id,
         CancellationToken cancellationToken = default)
     {
+        await using var mutationLease =
+            await _proxyManagement.AcquireMutationLeaseAsync(cancellationToken);
         var account = await _accountRepository.GetByIdAsync(id);
         if (account != null)
         {
-            // 先解绑并持久化，再删除账号，确保 Restrict 外键和专属代理资源都被正确处理。
-            await ReleaseAccountBindingAsync(account, cancellationToken);
+            // 解绑、资源回收和删除必须共享同一代理变更锁，避免窗口期被并发重新绑定。
+            await ReleaseAccountBindingAsync(mutationLease, account, cancellationToken);
 
             TryDeleteAccountFiles(account);
             await _accountRepository.DeleteAsync(account);
@@ -172,21 +174,14 @@ public class AccountManagementService
     /// </summary>
     public async Task PurgeAccountAsync(int id, CancellationToken cancellationToken = default)
     {
+        await using var mutationLease =
+            await _proxyManagement.AcquireMutationLeaseAsync(cancellationToken);
         var account = await _accountRepository.GetByIdAsync(id);
         if (account == null)
             return;
 
-        try
-        {
-            await _clientPool.RemoveClientAsync(account.Id);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to remove client for account {AccountId} before purge", account.Id);
-        }
-
         // 代理资源清理可能失败；必须在销毁 session 前完成，确保失败后账号仍可重试。
-        await ReleaseAccountBindingAsync(account, cancellationToken);
+        await ReleaseAccountBindingAsync(mutationLease, account, cancellationToken);
 
         var sessionCandidates = ResolveSessionFileCandidates(account).ToList();
         var existingSessionFiles = sessionCandidates
@@ -226,12 +221,15 @@ public class AccountManagementService
     }
 
     private async Task ReleaseAccountBindingAsync(
+        ProxyManagementService.MutationLease mutationLease,
         Account account,
         CancellationToken cancellationToken)
     {
-        await _proxyManagement.ReleaseAccountBindingAsync(
+        await _proxyManagement.ReleaseAccountBindingWithinMutationAsync(
+            mutationLease,
             account.Id,
             account.ProxyId ?? 0,
+            deactivateAccount: true,
             cancellationToken);
     }
 

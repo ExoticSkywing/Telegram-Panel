@@ -132,26 +132,56 @@ public sealed partial class ProxyManagementService
                 .Include(x => x.WarpProfile)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new KeyNotFoundException("代理不存在");
-            var accountIds = await _db.Accounts
+            var boundAccounts = await _db.Accounts
                 .Where(x => x.ProxyId == proxy.Id)
-                .Select(x => x.Id)
                 .ToListAsync(cancellationToken);
 
             if (proxy.Kind == OutboundProxyKinds.Warp)
             {
+                var warpProfile = proxy.WarpProfile
+                    ?? throw new InvalidOperationException("WARP 运行配置缺失，请删除后重新创建");
+                var enabledChanged = proxy.IsEnabled != input.IsEnabled;
+                var lifecycleChangeRequired = enabledChanged
+                    || warpProfile.DesiredEnabled != input.IsEnabled
+                    || (input.IsEnabled
+                        ? warpProfile.Status != "active"
+                        : warpProfile.Status != "stopped");
+                IReadOnlyDictionary<int, bool>? warpActivationStates = null;
+                if (lifecycleChangeRequired)
+                {
+                    warpActivationStates = await QuiesceBoundAccountsAsync(
+                        boundAccounts,
+                        cancellationToken);
+                    await ReleaseClientsStrictAsync(boundAccounts.Select(x => x.Id));
+                    await _warpManager.SetContainerEnabledAsync(
+                        warpProfile,
+                        input.IsEnabled,
+                        cancellationToken);
+                }
+
+                var now = DateTime.UtcNow;
                 proxy.Name = NormalizeName(input.Name, proxy.Name);
                 proxy.IsEnabled = input.IsEnabled;
-                if (proxy.WarpProfile != null)
-                    proxy.WarpProfile.DesiredEnabled = input.IsEnabled;
-                proxy.UpdatedAtUtc = DateTime.UtcNow;
+                warpProfile.DesiredEnabled = input.IsEnabled;
+                if (lifecycleChangeRequired)
+                {
+                    warpProfile.Status = input.IsEnabled ? "active" : "stopped";
+                    warpProfile.LastError = null;
+                    warpProfile.UpdatedAtUtc = now;
+                    ResetProbeState(proxy);
+                }
+                if (lifecycleChangeRequired && input.IsEnabled)
+                    RestoreBoundAccountActivation(boundAccounts, warpActivationStates!);
+                proxy.UpdatedAtUtc = now;
                 await _db.SaveChangesAsync(cancellationToken);
-                await ReleaseClientsAsync(accountIds);
                 return input.TestAfterSave
                     ? await TestAsyncCore(proxy, cancellationToken)
                     : proxy;
             }
 
             var normalized = NormalizeInput(input, proxy);
+            if (normalized.Kind == OutboundProxyKinds.Warp)
+                throw new ArgumentException("受管 WARP 请使用一键创建入口");
             await EnsureNoDuplicateAsync(normalized, id, cancellationToken);
             var connectionChanged =
                 !string.Equals(proxy.Kind, normalized.Kind, StringComparison.Ordinal)
@@ -161,8 +191,14 @@ public sealed partial class ProxyManagementService
                 || !string.Equals(proxy.Username, normalized.Username, StringComparison.Ordinal)
                 || !string.Equals(proxy.Password, normalized.Password, StringComparison.Ordinal)
                 || !string.Equals(proxy.Secret, normalized.Secret, StringComparison.Ordinal)
-                || !string.Equals(proxy.ResinPlatform, normalized.ResinPlatform, StringComparison.OrdinalIgnoreCase)
-                || !string.Equals(proxy.ResinAdminUrl, normalized.ResinAdminUrl, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(
+                    proxy.ResinPlatform,
+                    normalized.ResinPlatform,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    proxy.ResinAdminUrl,
+                    normalized.ResinAdminUrl,
+                    StringComparison.Ordinal)
                 || !string.Equals(proxy.ResinAdminToken, normalized.ResinAdminToken, StringComparison.Ordinal)
                 || proxy.IsEnabled != normalized.IsEnabled;
 
@@ -171,19 +207,31 @@ public sealed partial class ProxyManagementService
                     || !string.Equals(
                         proxy.ResinPlatform ?? "Default",
                         normalized.ResinPlatform ?? "Default",
-                        StringComparison.OrdinalIgnoreCase)
+                        StringComparison.Ordinal)
                     || !string.Equals(
                         proxy.ResinAdminUrl,
                         normalized.ResinAdminUrl,
-                        StringComparison.OrdinalIgnoreCase)
+                        StringComparison.Ordinal)
                     || !string.Equals(
                         proxy.ResinAdminToken,
                         normalized.ResinAdminToken,
                         StringComparison.Ordinal));
+
+            IReadOnlyDictionary<int, bool>? activationStates = null;
+            if (connectionChanged)
+            {
+                activationStates = await QuiesceBoundAccountsAsync(
+                    boundAccounts,
+                    cancellationToken);
+                await ReleaseClientsStrictAsync(boundAccounts.Select(x => x.Id));
+            }
+
             if (resinIdentityChanged)
             {
                 // 清理失败时必须保留旧控制面凭据，否则旧 Lease 将永久失去回收入口。
-                await ReleaseClientsStrictAsync(accountIds);
+                var accountIds = boundAccounts.Select(x => x.Id).ToArray();
+                if (!connectionChanged)
+                    await ReleaseClientsStrictAsync(accountIds);
                 foreach (var accountId in accountIds)
                     await ReleaseResinLeaseAsync(proxy, accountId, cancellationToken);
             }
@@ -194,7 +242,7 @@ public sealed partial class ProxyManagementService
             proxy.Host = normalized.Host!;
             proxy.Port = normalized.Port;
             proxy.Username = normalized.Username;
-            if (!string.IsNullOrWhiteSpace(input.Password))
+            if (input.ClearPassword || !string.IsNullOrWhiteSpace(input.Password))
                 proxy.Password = normalized.Password;
             proxy.Secret = normalized.Secret;
             proxy.ResinPlatform = normalized.ResinPlatform;
@@ -203,10 +251,10 @@ public sealed partial class ProxyManagementService
             proxy.IsEnabled = normalized.IsEnabled;
             if (connectionChanged)
                 ResetProbeState(proxy);
+            if (connectionChanged && normalized.IsEnabled)
+                RestoreBoundAccountActivation(boundAccounts, activationStates!);
             proxy.UpdatedAtUtc = DateTime.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
-
-            await ReleaseClientsAsync(accountIds);
 
             return normalized.TestAfterSave
                 ? await TestAsyncCore(proxy, cancellationToken)
@@ -279,15 +327,11 @@ public sealed partial class ProxyManagementService
             if (!account.UseGlobalProxy)
                 return await _probeService.ProbePanelAsync(cancellationToken);
 
-            var globalProxy = _configuration == null
-                ? null
-                : GlobalTelegramProxyConfiguration.Build(_configuration);
-            return globalProxy == null
-                ? await _probeService.ProbePanelAsync(cancellationToken)
-                : await _probeService.ProbeProxyAsync(
-                    globalProxy,
-                    requireWarp: false,
-                    cancellationToken);
+            var globalProxy = RequireGlobalProxy();
+            return await _probeService.ProbeProxyAsync(
+                globalProxy,
+                requireWarp: false,
+                cancellationToken);
         }
         if (account.Proxy is not { IsEnabled: true } proxy)
             throw new InvalidOperationException("账号绑定的代理不存在或已停用，已阻止检测面板直连出口");
@@ -296,6 +340,17 @@ public sealed partial class ProxyManagementService
             proxy,
             $"tg_account_{account.Id}",
             cancellationToken);
+    }
+
+    private ProxyConnectionOptions RequireGlobalProxy()
+    {
+        if (_configuration == null)
+        {
+            throw new InvalidOperationException(
+                "Telegram 全局代理配置不可用，已阻止降级为直连");
+        }
+
+        return GlobalTelegramProxyConfiguration.BuildRequired(_configuration);
     }
 
     public Task<OutboundProxy> CreateWarpAsync(
@@ -318,6 +373,28 @@ public sealed partial class ProxyManagementService
         proxy.EgressCity = null;
         proxy.EgressIsp = null;
         proxy.LastTestedAtUtc = null;
+    }
+
+    private async Task<IReadOnlyDictionary<int, bool>> QuiesceBoundAccountsAsync(
+        IReadOnlyCollection<Account> accounts,
+        CancellationToken cancellationToken)
+    {
+        var activationStates = accounts.ToDictionary(x => x.Id, x => x.IsActive);
+        foreach (var account in accounts)
+            account.IsActive = false;
+
+        if (activationStates.Values.Any(x => x))
+            await _db.SaveChangesAsync(cancellationToken);
+
+        return activationStates;
+    }
+
+    private static void RestoreBoundAccountActivation(
+        IEnumerable<Account> accounts,
+        IReadOnlyDictionary<int, bool> activationStates)
+    {
+        foreach (var account in accounts)
+            account.IsActive = activationStates[account.Id];
     }
 
     public async Task<IReadOnlyList<OutboundProxy>> ImportAsync(

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Configuration;
 using System.Collections.Concurrent;
 using TelegramPanel.Core.Interfaces;
 using TelegramPanel.Core.Models;
+using TelegramPanel.Core.Services.Proxy;
 using TelegramPanel.Core.Utils;
 using WTelegram;
 using AccountStatus = TelegramPanel.Core.Interfaces.AccountStatus;
@@ -29,7 +30,19 @@ public class AccountService : IAccountService
         _configuration = configuration;
     }
 
-    public async Task<LoginResult> StartLoginAsync(int accountId, string phone)
+    public Task<LoginResult> StartLoginAsync(
+        int accountId,
+        string phone,
+        AccountProxyResolution proxyResolution)
+    {
+        ArgumentNullException.ThrowIfNull(proxyResolution);
+        return StartLoginCoreAsync(accountId, phone, proxyResolution);
+    }
+
+    private async Task<LoginResult> StartLoginCoreAsync(
+        int accountId,
+        string phone,
+        AccountProxyResolution proxyOverride)
     {
         if (!int.TryParse(_configuration["Telegram:ApiId"], out var apiId) || apiId <= 0)
         {
@@ -58,29 +71,15 @@ public class AccountService : IAccountService
         {
             try
             {
-                client = await _clientPool.GetOrCreateClientAsync(
-                    accountId,
-                    apiId,
-                    apiHash,
-                    sessionPath,
-                    sessionKey: apiHash,
-                    phoneNumber: normalizedPhone,
-                    userId: null);
+                client = await CreateLoginClientAsync();
             }
             catch (Exception ex) when (LooksLikeSessionApiMismatchOrCorrupted(ex))
             {
                 // session 在创建 client 时也可能因为旧 ApiHash/密钥无法解密，这里同样自动备份后重建。
                 TryBackupCorruptedSessionIfExists(sessionPath);
-                await _clientPool.RemoveClientAsync(accountId);
+                await _clientPool.RemoveClientStrictAsync(accountId);
 
-                client = await _clientPool.GetOrCreateClientAsync(
-                    accountId,
-                    apiId,
-                    apiHash,
-                    sessionPath,
-                    sessionKey: apiHash,
-                    phoneNumber: normalizedPhone,
-                    userId: null);
+                client = await CreateLoginClientAsync();
             }
 
             string result;
@@ -92,16 +91,9 @@ public class AccountService : IAccountService
             {
                 // session 与 ApiId/ApiHash 不匹配或损坏，备份后重新开始登录流程
                 TryBackupCorruptedSessionIfExists(sessionPath);
-                await _clientPool.RemoveClientAsync(accountId);
+                await _clientPool.RemoveClientStrictAsync(accountId);
 
-                client = await _clientPool.GetOrCreateClientAsync(
-                    accountId,
-                    apiId,
-                    apiHash,
-                    sessionPath,
-                    sessionKey: apiHash,
-                    phoneNumber: normalizedPhone,
-                    userId: null);
+                client = await CreateLoginClientAsync();
 
                 result = await client.Login(normalizedPhone);
             }
@@ -121,7 +113,7 @@ public class AccountService : IAccountService
 
             if (!loginResult.Success && string.IsNullOrWhiteSpace(loginResult.NextStep))
             {
-                try { await _clientPool.RemoveClientAsync(accountId); } catch { }
+                try { await _clientPool.RemoveClientStrictAsync(accountId); } catch { }
             }
 
             return loginResult;
@@ -130,7 +122,7 @@ public class AccountService : IAccountService
         {
             try
             {
-                await _clientPool.RemoveClientAsync(accountId);
+                await _clientPool.RemoveClientStrictAsync(accountId);
             }
             catch
             {
@@ -140,9 +132,30 @@ public class AccountService : IAccountService
             _logger.LogWarning(ex, "StartLogin failed for phone {Phone} (accountId={AccountId}): {Hint}", normalizedPhone, accountId, hint);
             return new LoginResult(false, null, hint);
         }
+
+        Task<WTelegram.Client> CreateLoginClientAsync() =>
+            _clientPool.GetOrCreateClientAsync(
+                accountId,
+                apiId,
+                apiHash,
+                sessionPath,
+                apiHash,
+                normalizedPhone,
+                null,
+                proxyOverride);
     }
 
-    public async Task<QrLoginResult> StartQrLoginAsync(int loginId)
+    public Task<QrLoginResult> StartQrLoginAsync(
+        int loginId,
+        AccountProxyResolution proxyResolution)
+    {
+        ArgumentNullException.ThrowIfNull(proxyResolution);
+        return StartQrLoginCoreAsync(loginId, proxyResolution);
+    }
+
+    private async Task<QrLoginResult> StartQrLoginCoreAsync(
+        int loginId,
+        AccountProxyResolution proxyOverride)
     {
         if (loginId <= 0)
             loginId = Random.Shared.Next(1, int.MaxValue);
@@ -155,7 +168,7 @@ public class AccountService : IAccountService
         Directory.CreateDirectory(sessionsPath);
         var tempPath = Path.Combine(sessionsPath, $".qr-login-{loginId}-{Guid.NewGuid():N}.session");
 
-        await CancelQrLoginAsync(loginId);
+        await CancelQrLoginStrictAsync(loginId);
 
         var cts = new CancellationTokenSource(TimeSpan.FromMinutes(5));
         var session = new QrLoginSession(loginId, tempPath, api.ApiId, api.ApiHash, cts);
@@ -167,7 +180,13 @@ public class AccountService : IAccountService
 
         try
         {
-            session.Client = CreateStandaloneClient(api.ApiId, api.ApiHash, tempPath, api.ApiHash, session.WaitForPassword);
+            session.Client = CreateStandaloneClient(
+                api.ApiId,
+                api.ApiHash,
+                tempPath,
+                api.ApiHash,
+                session.WaitForPassword,
+                proxyOverride);
             session.LoginTask = RunQrLoginAsync(session);
 
             for (var i = 0; i < 40; i++)
@@ -185,7 +204,7 @@ public class AccountService : IAccountService
         }
         catch (Exception ex)
         {
-            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            await CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
             _logger.LogWarning(ex, "Start QR login failed (loginId={LoginId})", loginId);
             return new QrLoginResult(false, loginId, "failed", BuildFriendlyQrLoginError(ex));
         }
@@ -207,7 +226,7 @@ public class AccountService : IAccountService
 
         if (session.Status is "failed" or "expired")
         {
-            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            await CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
             return session.ToResult();
         }
 
@@ -215,7 +234,7 @@ public class AccountService : IAccountService
         {
             session.Status = "expired";
             session.Message = "二维码已过期，请重新生成";
-            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            await CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
             return session.ToResult();
         }
 
@@ -262,7 +281,7 @@ public class AccountService : IAccountService
 
         if (session.Status is "failed" or "expired")
         {
-            await CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+            await CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
             return session.ToResult();
         }
 
@@ -271,12 +290,17 @@ public class AccountService : IAccountService
 
     public Task CancelQrLoginAsync(int loginId)
     {
-        return CleanupQrLoginSessionAsync(loginId, deleteSessionFile: true);
+        return CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
+    }
+
+    public Task CancelQrLoginStrictAsync(int loginId)
+    {
+        return CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: true);
     }
 
     public Task ReleaseCompletedQrLoginAsync(int loginId)
     {
-        return CleanupQrLoginSessionAsync(loginId, deleteSessionFile: false);
+        return CleanupQrLoginSessionStrictAsync(loginId, deleteSessionFile: false);
     }
 
     private static string BuildFriendlyStartLoginError(Exception ex)
@@ -464,6 +488,11 @@ public class AccountService : IAccountService
         return _clientPool.RemoveClientAsync(accountId);
     }
 
+    public Task ReleaseClientStrictAsync(int accountId)
+    {
+        return _clientPool.RemoveClientStrictAsync(accountId);
+    }
+
     private async Task RunQrLoginAsync(QrLoginSession session)
     {
         try
@@ -537,42 +566,61 @@ public class AccountService : IAccountService
         if (session.Account?.Phone == null)
             return;
 
-        var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
-        Directory.CreateDirectory(sessionsPath);
-        var phoneDigits = PhoneNumberFormatter.NormalizeToDigits(session.Account.Phone);
-        if (string.IsNullOrWhiteSpace(phoneDigits))
-            return;
-
-        var finalPath = Path.Combine(sessionsPath, $"{phoneDigits}.session");
-
+        await session.LifecycleLock.WaitAsync();
         try
         {
+            var sessionsPath = _configuration["Telegram:SessionsPath"] ?? "sessions";
+            Directory.CreateDirectory(sessionsPath);
+            var phoneDigits = PhoneNumberFormatter.NormalizeToDigits(session.Account.Phone);
+            if (string.IsNullOrWhiteSpace(phoneDigits))
+                return;
+
+            var finalPath = Path.Combine(sessionsPath, $"{phoneDigits}.session");
             if (session.Client != null)
-                await session.Client.DisposeAsync();
-        }
-        catch
-        {
-            // 忽略释放失败，后续仍尝试迁移 session 文件
-        }
-
-        try
-        {
-            if (File.Exists(session.TempSessionPath))
             {
-                TryBackupSqliteSessionIfExists(finalPath);
-                File.Move(session.TempSessionPath, finalPath, overwrite: true);
-            }
-        }
-        catch (Exception ex)
-        {
-            session.Status = "failed";
-            session.Message = $"扫码登录成功，但保存 session 文件失败：{ex.Message}";
-            _logger.LogWarning(ex, "Failed to move QR login session file (loginId={LoginId})", session.LoginId);
-            return;
-        }
+                try
+                {
+                    await session.Client.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to strictly finalize QR login client (loginId={LoginId})",
+                        session.LoginId);
+                    throw new InvalidOperationException(
+                        $"二维码登录 {session.LoginId} 的客户端无法确认已断开，已保留冻结代理",
+                        ex);
+                }
 
-        session.Client = null;
-        session.KeepTempSession = true;
+                session.Client = null;
+            }
+
+            try
+            {
+                if (File.Exists(session.TempSessionPath))
+                {
+                    TryBackupSqliteSessionIfExists(finalPath);
+                    File.Move(session.TempSessionPath, finalPath, overwrite: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                session.Status = "failed";
+                session.Message = $"扫码登录成功，但保存 session 文件失败：{ex.Message}";
+                _logger.LogWarning(
+                    ex,
+                    "Failed to move QR login session file (loginId={LoginId})",
+                    session.LoginId);
+                return;
+            }
+
+            session.KeepTempSession = true;
+        }
+        finally
+        {
+            session.LifecycleLock.Release();
+        }
     }
 
     private WTelegram.Client CreateStandaloneClient(
@@ -580,16 +628,17 @@ public class AccountService : IAccountService
         string apiHash,
         string sessionPath,
         string sessionKey,
-        Func<string>? passwordProvider = null)
+        Func<string>? passwordProvider,
+        AccountProxyResolution proxyOverride)
     {
+        ArgumentNullException.ThrowIfNull(proxyOverride);
+        var accountProxy = proxyOverride.Proxy
+                           ?? (proxyOverride.UseGlobalProxy
+                               ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                               : null);
+
         string Config(string what)
         {
-            var proxyServer = (_configuration["Telegram:Proxy:Server"] ?? "").Trim();
-            var proxyPort = (_configuration["Telegram:Proxy:Port"] ?? "").Trim();
-            var proxyUsername = (_configuration["Telegram:Proxy:Username"] ?? "").Trim();
-            var proxyPassword = (_configuration["Telegram:Proxy:Password"] ?? "").Trim();
-            var proxySecret = (_configuration["Telegram:Proxy:Secret"] ?? "").Trim();
-
             return what switch
             {
                 "api_id" => apiId.ToString(),
@@ -597,47 +646,74 @@ public class AccountService : IAccountService
                 "session_pathname" => sessionPath,
                 "session_key" => sessionKey,
                 "password" => passwordProvider?.Invoke() ?? null!,
-                "proxy_server" => string.IsNullOrWhiteSpace(proxyServer) ? null! : proxyServer,
-                "proxy_port" => string.IsNullOrWhiteSpace(proxyPort) ? null! : proxyPort,
-                "proxy_username" => string.IsNullOrWhiteSpace(proxyUsername) ? null! : proxyUsername,
-                "proxy_password" => string.IsNullOrWhiteSpace(proxyPassword) ? null! : proxyPassword,
-                "proxy_secret" => string.IsNullOrWhiteSpace(proxySecret) ? null! : proxySecret,
                 _ => null!
             };
         }
 
-        return new WTelegram.Client(Config);
+        var client = new WTelegram.Client(Config);
+        TelegramClientProxyConfigurator.Apply(client, accountProxy);
+        return client;
     }
 
-    private async Task CleanupQrLoginSessionAsync(int loginId, bool deleteSessionFile)
+    private async Task CleanupQrLoginSessionStrictAsync(
+        int loginId,
+        bool deleteSessionFile)
     {
-        if (!QrLoginSessions.TryRemove(loginId, out var session))
+        if (!QrLoginSessions.TryGetValue(loginId, out var session))
             return;
 
+        await session.LifecycleLock.WaitAsync();
         try
         {
-            session.CancelPasswordWait();
-            session.Cancellation.Cancel();
-        }
-        catch
-        {
-            // ignore
-        }
+            if (!QrLoginSessions.TryGetValue(loginId, out var current)
+                || !ReferenceEquals(current, session))
+            {
+                return;
+            }
 
-        try
-        {
+            try
+            {
+                session.CancelPasswordWait();
+                session.Cancellation.Cancel();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Failed to cancel QR login wait (loginId={LoginId})", loginId);
+            }
+
             if (session.Client != null)
-                await session.Client.DisposeAsync();
+            {
+                try
+                {
+                    await session.Client.DisposeAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to strictly dispose QR login client (loginId={LoginId})",
+                        loginId);
+                    throw new InvalidOperationException(
+                        $"二维码登录 {loginId} 的旧 Telegram 客户端无法确认已断开",
+                        ex);
+                }
+
+                session.Client = null;
+            }
+
+            var removed = ((ICollection<KeyValuePair<int, QrLoginSession>>)QrLoginSessions)
+                .Remove(new KeyValuePair<int, QrLoginSession>(loginId, session));
+            if (!removed)
+                return;
+
+            session.Cancellation.Dispose();
+            if (deleteSessionFile && !session.KeepTempSession)
+                TryDeleteFile(session.TempSessionPath);
         }
-        catch (Exception ex)
+        finally
         {
-            _logger.LogDebug(ex, "Failed to dispose QR login client (loginId={LoginId})", loginId);
+            session.LifecycleLock.Release();
         }
-
-        session.Cancellation.Dispose();
-
-        if (deleteSessionFile && !session.KeepTempSession)
-            TryDeleteFile(session.TempSessionPath);
     }
 
     private (bool Valid, int ApiId, string ApiHash, string? Error) ValidateTelegramApi()
@@ -742,6 +818,7 @@ public class AccountService : IAccountService
         public int ApiId { get; }
         public string ApiHash { get; }
         public CancellationTokenSource Cancellation { get; }
+        public SemaphoreSlim LifecycleLock { get; } = new(1, 1);
         public WTelegram.Client? Client { get; set; }
         public Task? LoginTask { get; set; }
         public string Status { get; set; } = "pending";

@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
+using TelegramPanel.Web.Modules;
 
 namespace TelegramPanel.Web.Services;
 
@@ -167,16 +168,20 @@ public sealed class AppSelfUpdateService
 
             var workRoot = ResolveWorkRoot(options);
             Directory.CreateDirectory(workRoot);
+            var (workspaceDir, currentDir, backupDir) = ResolveUpdateDirectories(
+                workRoot,
+                options);
 
-            var workspaceDir = Path.Combine(workRoot, options.WorkDirectoryName.Trim().Length == 0 ? "self-update" : options.WorkDirectoryName.Trim());
-            var currentDir = Path.Combine(workRoot, options.CurrentDirectoryName.Trim().Length == 0 ? "app-current" : options.CurrentDirectoryName.Trim());
-            var backupDir = Path.Combine(workRoot, options.BackupDirectoryName.Trim().Length == 0 ? "app-previous" : options.BackupDirectoryName.Trim());
-
-            var unsafeStorage = FindUnsafeStoragePaths(currentDir, backupDir, workspaceDir);
+            var unsafeStorage = FindUnsafeStoragePaths(
+                _configuration,
+                _environment,
+                currentDir,
+                backupDir,
+                workspaceDir);
             if (unsafeStorage.Count > 0)
             {
                 return AppSelfUpdateApplyResult.Failed(
-                    "一键更新已阻止：以下持久化数据仍位于会被轮换的程序目录中："
+                    "一键更新已阻止：以下持久化路径位于会被轮换的程序目录中，或无法安全解析："
                     + string.Join("；", unsafeStorage)
                     + "。请先把路径迁移到 /data 或其它持久化卷后再更新。");
             }
@@ -289,7 +294,7 @@ public sealed class AppSelfUpdateService
         if (!string.IsNullOrWhiteSpace(configured))
         {
             if (Path.IsPathRooted(configured))
-                return configured;
+                return Path.GetFullPath(configured);
 
             var stableRoot = StoragePathResolver.ResolvePersistentRoot(_configuration)
                 ?? _environment.ContentRootPath;
@@ -299,16 +304,135 @@ public sealed class AppSelfUpdateService
         if (Directory.Exists("/data"))
             return "/data";
 
-        return _environment.ContentRootPath;
+        return Path.GetFullPath(_environment.ContentRootPath);
     }
 
-    private List<string> FindUnsafeStoragePaths(string currentDir, string backupDir, string workspaceDir)
+    internal static (string WorkspaceDir, string CurrentDir, string BackupDir) ResolveUpdateDirectories(
+        string workRoot,
+        SelfUpdateOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+
+        var normalizedRoot = Path.GetFullPath(workRoot);
+        if (!StoragePathResolver.TryResolvePhysicalPath(
+                normalizedRoot,
+                out var physicalRoot,
+                out var rootError))
+        {
+            throw new InvalidOperationException(
+                $"自更新工作根目录无法安全解析：{normalizedRoot}（{rootError}）");
+        }
+
+        var workspace = ResolveUpdateDirectory(
+            normalizedRoot,
+            physicalRoot,
+            options.WorkDirectoryName,
+            "self-update",
+            nameof(SelfUpdateOptions.WorkDirectoryName));
+        var current = ResolveUpdateDirectory(
+            normalizedRoot,
+            physicalRoot,
+            options.CurrentDirectoryName,
+            "app-current",
+            nameof(SelfUpdateOptions.CurrentDirectoryName));
+        var backup = ResolveUpdateDirectory(
+            normalizedRoot,
+            physicalRoot,
+            options.BackupDirectoryName,
+            "app-previous",
+            nameof(SelfUpdateOptions.BackupDirectoryName));
+
+        var comparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var directories = new[] { workspace, current, backup };
+        if (directories.Select(x => x.LogicalPath).Distinct(comparer).Count() != directories.Length
+            || directories.Select(x => x.PhysicalPath).Distinct(comparer).Count() != directories.Length)
+        {
+            throw new InvalidOperationException(
+                "自更新工作目录、当前版本目录和备份目录必须互不相同");
+        }
+
+        return (workspace.LogicalPath, current.LogicalPath, backup.LogicalPath);
+    }
+
+    private static (string LogicalPath, string PhysicalPath) ResolveUpdateDirectory(
+        string workRoot,
+        string physicalWorkRoot,
+        string? configuredName,
+        string defaultName,
+        string optionName)
+    {
+        var directoryName = (configuredName ?? string.Empty).Trim();
+        if (directoryName.Length == 0)
+            directoryName = defaultName;
+
+        if (directoryName is "." or ".."
+            || Path.IsPathRooted(directoryName)
+            || directoryName.Contains('/')
+            || directoryName.Contains('\\'))
+        {
+            throw new InvalidOperationException(
+                $"{optionName} 必须是 WorkRootPath 下的单级目录名");
+        }
+
+        var logicalPath = Path.GetFullPath(Path.Combine(workRoot, directoryName));
+        if (string.Equals(logicalPath, workRoot, StringComparison.OrdinalIgnoreCase)
+            || !StoragePathResolver.IsPathWithin(logicalPath, workRoot))
+        {
+            throw new InvalidOperationException(
+                $"{optionName} 必须位于 WorkRootPath 内");
+        }
+
+        if (!StoragePathResolver.TryResolvePhysicalPath(
+                logicalPath,
+                out var physicalPath,
+                out var error))
+        {
+            throw new InvalidOperationException(
+                $"{optionName} 无法安全解析：{logicalPath}（{error}）");
+        }
+
+        if (!StoragePathResolver.IsPathWithin(physicalPath, physicalWorkRoot))
+        {
+            throw new InvalidOperationException(
+                $"{optionName} 的真实路径超出 WorkRootPath：{logicalPath}");
+        }
+
+        return (logicalPath, physicalPath);
+    }
+
+    internal static List<string> FindUnsafeStoragePaths(
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        string currentDir,
+        string backupDir,
+        string workspaceDir)
     {
         var paths = new List<(string Name, string Path)>();
+        var failures = new List<string>();
+        var pathComparer = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+
+        void AddPath(string name, Func<string> resolver)
+        {
+            try
+            {
+                var resolved = resolver();
+                if (string.IsNullOrWhiteSpace(resolved))
+                    throw new InvalidOperationException("配置结果为空");
+                paths.Add((name, Path.GetFullPath(resolved)));
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"{name}路径解析失败（{ex.Message}）");
+            }
+        }
 
         try
         {
-            var connectionString = _configuration.GetConnectionString("DefaultConnection")
+            var connectionString = configuration.GetConnectionString("DefaultConnection")
                 ?? "Data Source=telegram_panel.db";
             var dataSource = new SqliteConnectionStringBuilder(connectionString).DataSource;
             if (!string.IsNullOrWhiteSpace(dataSource)
@@ -317,45 +441,108 @@ public sealed class AppSelfUpdateService
                 paths.Add(("数据库", Path.IsPathRooted(dataSource)
                     ? Path.GetFullPath(dataSource)
                     : StoragePathResolver.ResolveWritablePath(
-                        _configuration,
-                        _environment,
+                        configuration,
+                        environment,
                         dataSource,
                         "telegram_panel.db")));
             }
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Failed to resolve database path before self update");
-            paths.Add(("数据库配置", _environment.ContentRootPath));
+            failures.Add($"数据库路径解析失败（{ex.Message}）");
         }
 
-        paths.Add((
+        AddPath(
             "后台凭据",
-            StoragePathResolver.ResolveWritablePath(
-                _configuration,
-                _environment,
-                _configuration["AdminAuth:CredentialsPath"],
-                "admin_auth.json")));
-        paths.Add((
+            () => StoragePathResolver.ResolveWritablePath(
+                configuration,
+                environment,
+                configuration["AdminAuth:CredentialsPath"],
+                "admin_auth.json"));
+        AddPath(
             "Session",
-            StoragePathResolver.ResolveWritablePath(
-                _configuration,
-                _environment,
-                _configuration["Telegram:SessionsPath"],
-                "sessions")));
+            () => StoragePathResolver.ResolveWritablePath(
+                configuration,
+                environment,
+                configuration["Telegram:SessionsPath"],
+                "sessions"));
+        AddPath(
+            "本地配置",
+            () => LocalConfigFile.ResolvePath(configuration, environment));
+        AddPath(
+            "DataProtection 密钥",
+            () =>
+            {
+                var configured = (configuration["DataProtection:KeysPath"] ?? string.Empty).Trim();
+                return string.IsNullOrWhiteSpace(configured)
+                    ? Path.Combine(
+                        StoragePathResolver.ResolveWritableRoot(configuration, environment),
+                        Directory.Exists("/data") ? "keys" : "data-protection-keys")
+                    : StoragePathResolver.ResolveRelativeToBase(configured, environment.ContentRootPath);
+            });
+        AddPath(
+            "Modules",
+            () => ModulePaths.ResolveModulesRoot(configuration, environment));
+        AddPath(
+            "Uploads",
+            () => ImageAssetStorageService.ResolveUploadsRootPath(configuration, environment));
 
         var replaceableRoots = new[]
         {
-            Path.GetFullPath(currentDir),
-            Path.GetFullPath(backupDir),
-            Path.GetFullPath(workspaceDir),
-            Path.GetFullPath(_environment.ContentRootPath)
+            (Name: "当前版本目录", Path: currentDir),
+            (Name: "备份目录", Path: backupDir),
+            (Name: "更新工作目录", Path: workspaceDir),
+            (Name: "安装目录", Path: environment.ContentRootPath)
         };
 
-        return paths
-            .Where(item => replaceableRoots.Any(root => StoragePathResolver.IsPathWithin(item.Path, root)))
-            .Select(item => $"{item.Name}={item.Path}")
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var resolvedRoots = new List<(string LogicalPath, string PhysicalPath)>();
+        foreach (var root in replaceableRoots)
+        {
+            try
+            {
+                var logicalPath = Path.GetFullPath(root.Path);
+                if (!StoragePathResolver.TryResolvePhysicalPath(
+                        logicalPath,
+                        out var physicalPath,
+                        out var error))
+                {
+                    failures.Add($"{root.Name}无法安全解析：{logicalPath}（{error}）");
+                    continue;
+                }
+
+                resolvedRoots.Add((logicalPath, physicalPath));
+            }
+            catch (Exception ex)
+            {
+                failures.Add($"{root.Name}无法安全解析：{root.Path}（{ex.Message}）");
+            }
+        }
+
+        foreach (var item in paths)
+        {
+            if (!StoragePathResolver.TryResolvePhysicalPath(
+                    item.Path,
+                    out var physicalPath,
+                    out var error))
+            {
+                failures.Add($"{item.Name}路径无法安全解析：{item.Path}（{error}）");
+                continue;
+            }
+
+            var isUnsafe = resolvedRoots.Any(root =>
+                StoragePathResolver.IsPathWithin(item.Path, root.LogicalPath)
+                || StoragePathResolver.IsPathWithin(physicalPath, root.PhysicalPath));
+            if (!isUnsafe)
+                continue;
+
+            var physicalSuffix = pathComparer.Equals(item.Path, physicalPath)
+                ? string.Empty
+                : $"（真实路径={physicalPath}）";
+            failures.Add($"{item.Name}={item.Path}{physicalSuffix}");
+        }
+
+        return failures
+            .Distinct(pathComparer)
             .ToList();
     }
 

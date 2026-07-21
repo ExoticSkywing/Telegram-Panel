@@ -372,6 +372,59 @@ public sealed class WarpContainerManager
         }
     }
 
+    /// <summary>
+    /// 严格启动或停止受管 WARP 容器。仅在容器归属校验通过后执行，
+    /// 不修改数据库状态，由调用方在 Docker 操作成功后统一提交。
+    /// </summary>
+    public async Task SetContainerEnabledAsync(
+        WarpProfile profile,
+        bool enabled,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        await LifecycleLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (profile.Status is "creating" or "starting" or "deleting"
+                or "deleted" or "failed" or "cleanup_pending")
+            {
+                throw new InvalidOperationException(
+                    $"WARP 当前状态为 {profile.Status}，不能执行{(enabled ? "启动" : "停止")}");
+            }
+
+            var settings = WarpSettings.From(_configuration);
+            if (!_dockerFactory.PlatformSupported)
+                throw new InvalidOperationException("WARP 仅支持在 Linux Docker 环境中运行");
+            if (enabled && !settings.Enabled)
+                throw new InvalidOperationException("WARP 未启用，请设置 Proxy:Warp:Enabled=true");
+
+            var containerReference = string.IsNullOrWhiteSpace(profile.ContainerId)
+                ? profile.ContainerName
+                : profile.ContainerId;
+            if (string.IsNullOrWhiteSpace(containerReference))
+                throw new InvalidOperationException("WARP 容器标识缺失，请删除后重新创建");
+
+            using var docker = _dockerFactory.Create(settings.DockerSocketPath);
+            await docker.GetVersionAsync(cancellationToken);
+            if (!await docker.VerifyContainerOwnershipAsync(
+                    containerReference,
+                    profile.ProfileId,
+                    cancellationToken))
+            {
+                throw new InvalidOperationException("WARP 容器不存在，请删除后重新创建");
+            }
+
+            if (enabled)
+                await docker.StartContainerAsync(containerReference, cancellationToken);
+            else
+                await docker.StopContainerAsync(containerReference, cancellationToken);
+        }
+        finally
+        {
+            LifecycleLock.Release();
+        }
+    }
+
     private async Task CleanupHistoricalFailedProfileAsync(
         WarpProfile profile,
         WarpSettings settings,
@@ -625,6 +678,7 @@ public sealed class WarpContainerManager
             int hostPort,
             CancellationToken cancellationToken);
         Task StartContainerAsync(string containerId, CancellationToken cancellationToken);
+        Task StopContainerAsync(string containerId, CancellationToken cancellationToken);
         Task<bool> VerifyContainerOwnershipAsync(
             string containerId,
             string profileId,
@@ -832,6 +886,19 @@ public sealed class WarpContainerManager
             using var timeout = TimeoutAfter(cancellationToken, MutationTimeout);
             using var response = await _http.PostAsync(
                 Api($"/containers/{Uri.EscapeDataString(containerId)}/start"),
+                null,
+                timeout.Token);
+            if (response.StatusCode != HttpStatusCode.NotModified)
+                await EnsureSuccessAsync(response, timeout.Token);
+        }
+
+        public async Task StopContainerAsync(
+            string containerId,
+            CancellationToken cancellationToken)
+        {
+            using var timeout = TimeoutAfter(cancellationToken, MutationTimeout);
+            using var response = await _http.PostAsync(
+                Api($"/containers/{Uri.EscapeDataString(containerId)}/stop?t=10"),
                 null,
                 timeout.Token);
             if (response.StatusCode != HttpStatusCode.NotModified)

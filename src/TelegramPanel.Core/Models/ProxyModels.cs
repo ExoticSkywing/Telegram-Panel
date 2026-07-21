@@ -41,7 +41,17 @@ public sealed record ProxyConnectionOptions(
     string? Secret);
 
 /// <summary>
-/// 账号的最终代理路由；Proxy 为空时由 UseGlobalProxy 区分全局配置与显式直连。
+/// Resin 临时 Lease 创建时的控制面快照，确保并发编辑或删除代理后仍能用原凭据回收。
+/// </summary>
+public sealed record ResinLeaseControlSnapshot(
+    int ProxyId,
+    string? AdminUrl,
+    string? AdminToken,
+    string? Platform);
+
+/// <summary>
+/// 账号的最终代理路由。正常解析结果会把全局代理固化到 Proxy；
+/// UseGlobalProxy 仅保留给显式调用方的兼容输入，消费者仍必须以闭锁方式解析它。
 /// </summary>
 public sealed record AccountProxyResolution(
     ProxyConnectionOptions? Proxy,
@@ -77,7 +87,9 @@ public sealed record OutboundProxyInput(
     string? ResinAdminUrl,
     string? ResinAdminToken,
     bool IsEnabled = true,
-    bool TestAfterSave = false);
+    bool TestAfterSave = false,
+    bool ClearPassword = false,
+    bool ClearResinAdminToken = false);
 
 /// <summary>
 /// 账号代理绑定输入。

@@ -112,16 +112,31 @@
                   type="primary"
                   :icon="VideoPlay"
                   :loading="testingIds.has(row.id)"
-                  :disabled="testingIds.has(row.id) || !row.isEnabled"
+                  :disabled="testingIds.has(row.id) || deletingIds.has(row.id) || !row.isEnabled"
                   title="检测出口 IP"
                   @click="testProxy(row)"
                 />
               </el-tooltip>
               <el-tooltip v-if="row.kind !== 'warp'" content="编辑代理" placement="top">
-                <el-button link type="primary" :icon="Edit" title="编辑代理" @click="openEdit(row)" />
+                <el-button
+                  link
+                  type="primary"
+                  :icon="Edit"
+                  :disabled="deletingIds.has(row.id)"
+                  title="编辑代理"
+                  @click="openEdit(row)"
+                />
               </el-tooltip>
               <el-tooltip content="删除代理" placement="top">
-                <el-button link type="danger" :icon="Delete" title="删除代理" @click="removeProxy(row)" />
+                <el-button
+                  link
+                  type="danger"
+                  :icon="Delete"
+                  :loading="deletingIds.has(row.id)"
+                  :disabled="deletingIds.has(row.id) || testingIds.has(row.id)"
+                  title="删除代理"
+                  @click="removeProxy(row)"
+                />
               </el-tooltip>
             </div>
           </template>
@@ -134,12 +149,14 @@
 
     <el-dialog
       v-model="proxyDialog.visible"
+      class="proxy-editor-dialog"
       :title="proxyDialog.id ? '编辑代理' : '新增代理'"
       width="min(620px, calc(100vw - 24px))"
       :before-close="beforeProxyDialogClose"
       :close-on-click-modal="!proxyDialog.saving"
       :close-on-press-escape="!proxyDialog.saving"
       :show-close="!proxyDialog.saving"
+      @closed="resetProxyDialog"
     >
       <el-form :model="proxyDialog.form" label-position="top" :disabled="proxyDialog.saving">
         <el-form-item label="代理类型" prop="kind" required>
@@ -165,17 +182,35 @@
           <el-form-item label="端口" prop="port" required>
             <el-input-number v-model="proxyDialog.form.port" :min="1" :max="65535" controls-position="right" class="full" />
           </el-form-item>
-          <el-form-item label="用户名">
-            <el-input v-model="proxyDialog.form.username" autocomplete="off" placeholder="留空表示不使用用户名" />
-          </el-form-item>
-          <el-form-item label="密码">
+          <el-form-item :label="proxyDialog.form.kind === 'resin' ? '用户名（自动生成）' : '用户名'">
             <el-input
-              v-model="proxyDialog.form.password"
-              type="password"
-              show-password
-              autocomplete="new-password"
-              :placeholder="proxyDialog.hasPassword ? '留空保持原密码' : ''"
+              v-model="proxyDialog.form.username"
+              autocomplete="off"
+              :disabled="proxyDialog.form.kind === 'resin'"
+              :placeholder="proxyDialog.form.kind === 'resin'
+                ? '由 Platform 和账号 ID 自动生成'
+                : '留空表示不使用用户名'"
             />
+          </el-form-item>
+          <el-form-item :label="proxyDialog.form.kind === 'resin' ? 'Proxy Token' : '密码'">
+            <div class="credential-field">
+              <el-input
+                v-model="proxyDialog.form.password"
+                type="password"
+                show-password
+                autocomplete="new-password"
+                :disabled="proxyDialog.form.clearPassword"
+                :placeholder="proxyDialog.hasPassword
+                  ? (proxyDialog.form.kind === 'resin' ? '留空保持原 Token' : '留空保持原密码')
+                  : (proxyDialog.form.kind === 'resin' ? '可留空，需与 Resin 配置一致' : '')"
+              />
+              <el-checkbox
+                v-if="proxyDialog.id && proxyDialog.hasPassword"
+                v-model="proxyDialog.form.clearPassword"
+              >
+                清除已保存的{{ proxyDialog.form.kind === 'resin' ? ' Proxy Token' : '密码' }}
+              </el-checkbox>
+            </div>
           </el-form-item>
         </div>
         <el-form-item v-if="proxyDialog.form.protocol === 'mtproto'" label="MTProto Secret" required>
@@ -188,6 +223,24 @@
         </el-form-item>
         <template v-if="proxyDialog.form.kind === 'resin'">
           <el-divider content-position="left">Resin 配置</el-divider>
+          <div class="resin-project-reference">
+            <span>开源项目：</span>
+            <el-link
+              type="primary"
+              href="https://github.com/Resinat/Resin"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Resinat/Resin
+            </el-link>
+          </div>
+          <el-alert
+            title="需要 Resin RESIN_AUTH_VERSION=V1；账号身份由面板自动保持稳定"
+            type="info"
+            :closable="false"
+            show-icon
+            class="mb-3"
+          />
           <div class="form-grid">
             <el-form-item label="平台标识" required>
               <el-input v-model="proxyDialog.form.resinPlatform" placeholder="telegram-panel" />
@@ -197,13 +250,22 @@
             </el-form-item>
           </div>
           <el-form-item label="管理令牌">
-            <el-input
-              v-model="proxyDialog.form.resinAdminToken"
-              type="password"
-              show-password
-              autocomplete="new-password"
-              :placeholder="proxyDialog.hasResinAdminToken ? '留空保持原令牌' : ''"
-            />
+            <div class="credential-field">
+              <el-input
+                v-model="proxyDialog.form.resinAdminToken"
+                type="password"
+                show-password
+                autocomplete="new-password"
+                :disabled="proxyDialog.form.clearResinAdminToken"
+                :placeholder="proxyDialog.hasResinAdminToken ? '留空保持原令牌' : ''"
+              />
+              <el-checkbox
+                v-if="proxyDialog.id && proxyDialog.hasResinAdminToken"
+                v-model="proxyDialog.form.clearResinAdminToken"
+              >
+                清除已保存的管理令牌
+              </el-checkbox>
+            </div>
           </el-form-item>
         </template>
         <div class="form-options">
@@ -212,7 +274,7 @@
         </div>
       </el-form>
       <template #footer>
-        <el-button :disabled="proxyDialog.saving" @click="proxyDialog.visible = false">取消</el-button>
+        <el-button :disabled="proxyDialog.saving" @click="closeProxyDialog">取消</el-button>
         <el-button type="primary" :loading="proxyDialog.saving" @click="saveProxy">保存</el-button>
       </template>
     </el-dialog>
@@ -225,6 +287,7 @@
       :close-on-click-modal="!importDialog.importing"
       :close-on-press-escape="!importDialog.importing"
       :show-close="!importDialog.importing"
+      @closed="resetImportDialog"
     >
       <el-form label-position="top" :disabled="importDialog.importing">
         <el-form-item label="代理文本">
@@ -238,7 +301,7 @@
         <el-checkbox v-model="importDialog.testAfterImport">导入后逐个检测出口</el-checkbox>
       </el-form>
       <template #footer>
-        <el-button :disabled="importDialog.importing" @click="importDialog.visible = false">取消</el-button>
+        <el-button :disabled="importDialog.importing" @click="closeImportDialog">取消</el-button>
         <el-button type="primary" :loading="importDialog.importing" @click="importProxyText">导入</el-button>
       </template>
     </el-dialog>
@@ -304,7 +367,10 @@ const panelEgressError = ref('')
 const warpStatus = ref<WarpRuntimeStatus | null>(null)
 const warpStatusError = ref('')
 const testingIds = reactive(new Set<number>())
+const deletingIds = reactive(new Set<number>())
+let proxyListOperationToken = 0
 let panelEgressOperationToken = 0
+let warpStatusOperationToken = 0
 let proxySaveOperationToken = 0
 let proxyImportOperationToken = 0
 let warpCreateOperationToken = 0
@@ -319,10 +385,12 @@ const blankProxyForm = (): SaveOutboundProxyRequest => ({
   port: 1080,
   username: '',
   password: '',
+  clearPassword: false,
   secret: '',
   resinPlatform: '',
   resinAdminUrl: '',
   resinAdminToken: '',
+  clearResinAdminToken: false,
   isEnabled: true,
   testAfterSave: true,
 })
@@ -435,11 +503,15 @@ function egressLocation(egress?: NetworkEgress | null) {
 }
 
 function beforeProxyDialogClose(done: DialogCloseDone) {
-  if (!proxyDialog.saving) done()
+  if (proxyDialog.saving) return
+  resetProxyDialog()
+  done()
 }
 
 function beforeImportDialogClose(done: DialogCloseDone) {
-  if (!importDialog.importing) done()
+  if (importDialog.importing) return
+  resetImportDialog()
+  done()
 }
 
 function beforeWarpDialogClose(done: DialogCloseDone) {
@@ -447,11 +519,13 @@ function beforeWarpDialogClose(done: DialogCloseDone) {
 }
 
 async function loadProxies() {
+  const operationToken = ++proxyListOperationToken
   loading.value = true
   try {
-    proxies.value = await panelApi.proxies()
+    const result = await panelApi.proxies()
+    if (operationToken === proxyListOperationToken) proxies.value = result
   } finally {
-    loading.value = false
+    if (operationToken === proxyListOperationToken) loading.value = false
   }
 }
 
@@ -473,12 +547,16 @@ async function loadPanelEgress() {
 }
 
 async function loadWarpStatus() {
+  const operationToken = ++warpStatusOperationToken
   warpStatusError.value = ''
   try {
-    warpStatus.value = await panelApi.warpStatus()
+    const result = await panelApi.warpStatus()
+    if (operationToken === warpStatusOperationToken) warpStatus.value = result
   } catch (error) {
-    warpStatus.value = null
-    warpStatusError.value = error instanceof Error ? error.message : '无法读取 WARP 运行状态'
+    if (operationToken === warpStatusOperationToken) {
+      warpStatus.value = null
+      warpStatusError.value = error instanceof Error ? error.message : '无法读取 WARP 运行状态'
+    }
   }
 }
 
@@ -497,6 +575,20 @@ function openCreate() {
   proxyDialog.visible = true
 }
 
+function resetProxyDialog() {
+  proxyDialog.id = null
+  proxyDialog.hasPassword = false
+  proxyDialog.hasSecret = false
+  proxyDialog.hasResinAdminToken = false
+  proxyDialog.form = blankProxyForm()
+}
+
+function closeProxyDialog() {
+  if (proxyDialog.saving) return
+  resetProxyDialog()
+  proxyDialog.visible = false
+}
+
 function openEdit(proxy: OutboundProxy) {
   if (proxyDialog.saving) return
   proxySaveOperationToken += 1
@@ -512,10 +604,12 @@ function openEdit(proxy: OutboundProxy) {
     port: proxy.port,
     username: proxy.username || '',
     password: '',
+    clearPassword: false,
     secret: '',
     resinPlatform: proxy.resinPlatform || '',
     resinAdminUrl: proxy.resinAdminUrl || '',
     resinAdminToken: '',
+    clearResinAdminToken: false,
     isEnabled: proxy.isEnabled,
     testAfterSave: false,
   }
@@ -525,9 +619,20 @@ function openEdit(proxy: OutboundProxy) {
 function openImportDialog() {
   if (importDialog.importing) return
   proxyImportOperationToken += 1
+  resetImportDialog()
   importDialog.visible = true
 }
 
+function resetImportDialog() {
+  importDialog.text = ''
+  importDialog.testAfterImport = false
+}
+
+function closeImportDialog() {
+  if (importDialog.importing) return
+  resetImportDialog()
+  importDialog.visible = false
+}
 function onProxyKindChange(kind: string | number | boolean | undefined) {
   if (kind === 'resin' && proxyDialog.form.protocol === 'mtproto') {
     proxyDialog.form.protocol = 'socks5'
@@ -558,10 +663,12 @@ async function saveProxy() {
     // 空字符串表示显式清空；null 在更新接口中表示沿用旧值。
     username: form.username?.trim() ?? '',
     password: normalizeOptional(form.password),
+    clearPassword: Boolean(form.clearPassword),
     secret: normalizeOptional(form.secret),
     resinPlatform: form.kind === 'resin' ? normalizeOptional(form.resinPlatform) : null,
     resinAdminUrl: form.kind === 'resin' ? form.resinAdminUrl?.trim() ?? '' : null,
     resinAdminToken: form.kind === 'resin' ? normalizeOptional(form.resinAdminToken) : null,
+    clearResinAdminToken: form.kind === 'resin' && Boolean(form.clearResinAdminToken),
   }
 
   const operationToken = ++proxySaveOperationToken
@@ -578,6 +685,7 @@ async function saveProxy() {
       ElMessage.success(editingId ? '代理已更新' : '代理已创建')
     }
     proxyDialog.visible = false
+    resetProxyDialog()
   } finally {
     await Promise.allSettled([loadProxies()])
     if (operationToken === proxySaveOperationToken) proxyDialog.saving = false
@@ -598,16 +706,25 @@ async function testProxy(proxy: OutboundProxy) {
 }
 
 async function removeProxy(proxy: OutboundProxy) {
-  await ElMessageBox.confirm(
-    `确定删除代理“${proxy.name}”吗？已绑定账号需要先切换为直连或其他代理。`,
-    '确认删除',
-    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
-  )
+  if (deletingIds.has(proxy.id)) return
+  try {
+    await ElMessageBox.confirm(
+      `确定删除代理“${proxy.name}”吗？已绑定账号需要先切换为直连或其他代理。`,
+      '确认删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  if (deletingIds.has(proxy.id)) return
+  deletingIds.add(proxy.id)
   try {
     const result = await panelApi.deleteProxy(proxy.id)
     ElMessage.success(result.message || '代理已删除')
   } finally {
     await Promise.allSettled([loadProxies()])
+    deletingIds.delete(proxy.id)
   }
 }
 
@@ -625,7 +742,7 @@ async function importProxyText() {
     if (operationToken !== proxyImportOperationToken) return
     ElMessage.success(`已导入 ${imported.length} 个代理`)
     importDialog.visible = false
-    importDialog.text = ''
+    resetImportDialog()
   } finally {
     // 超时或取消时后端可能已完成前半批，始终重新读取实际列表。
     await Promise.allSettled([loadProxies()])
@@ -751,6 +868,25 @@ onMounted(() => {
   gap: 0 16px;
 }
 
+.credential-field {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+}
+
+.resin-project-reference {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 12px;
+  color: var(--tp-muted);
+  font-size: 13px;
+}
+
+.resin-project-reference :deep(.el-link) {
+  font-weight: 600;
+}
+
 .form-options {
   justify-content: space-between;
   gap: 16px;
@@ -762,6 +898,23 @@ onMounted(() => {
 }
 
 @media (max-width: 640px) {
+  :global(.proxy-editor-dialog) {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 24px);
+    margin: 12px auto !important;
+  }
+
+  :global(.proxy-editor-dialog .el-dialog__body) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  :global(.proxy-editor-dialog .el-dialog__footer) {
+    flex: none;
+  }
+
   .network-strip,
   .network-main {
     align-items: flex-start;

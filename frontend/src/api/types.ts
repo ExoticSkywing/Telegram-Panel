@@ -65,10 +65,12 @@ export interface SaveOutboundProxyRequest {
   port: number
   username?: string | null
   password?: string | null
+  clearPassword?: boolean
   secret?: string | null
   resinPlatform?: string | null
   resinAdminUrl?: string | null
   resinAdminToken?: string | null
+  clearResinAdminToken?: boolean
   isEnabled: boolean
   testAfterSave: boolean
 }
