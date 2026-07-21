@@ -488,16 +488,16 @@ public class AccountTelegramToolsService
                     return (true, "二级密码已重置成功（现在可以直接重新设置二级密码）", null);
 
                 case TL.Account_ResetPasswordRequestedWait wait:
-                {
-                    var untilUtc = ToUtcDateTimeOffset(wait.until_date);
-                    return (true, $"已提交重置申请，请等待至 {untilUtc:yyyy-MM-dd HH:mm:ss} UTC 后再完成重置/重新设置二级密码", untilUtc);
-                }
+                    {
+                        var untilUtc = ToUtcDateTimeOffset(wait.until_date);
+                        return (true, $"已提交重置申请，请等待至 {untilUtc:yyyy-MM-dd HH:mm:ss} UTC 后再完成重置/重新设置二级密码", untilUtc);
+                    }
 
                 case TL.Account_ResetPasswordFailedWait failed:
-                {
-                    var retryUtc = ToUtcDateTimeOffset(failed.retry_date);
-                    return (false, $"近期有被取消的重置申请，需等待至 {retryUtc:yyyy-MM-dd HH:mm:ss} UTC 后才能再次申请", retryUtc);
-                }
+                    {
+                        var retryUtc = ToUtcDateTimeOffset(failed.retry_date);
+                        return (false, $"近期有被取消的重置申请，需等待至 {retryUtc:yyyy-MM-dd HH:mm:ss} UTC 后才能再次申请", retryUtc);
+                    }
 
                 default:
                     return (false, $"未知返回类型：{result.GetType().Name}", null);
@@ -1315,29 +1315,29 @@ public class AccountTelegramToolsService
             switch (chat)
             {
                 case TL.Channel channel when channel.IsActive:
-                {
-                    var rawId = channel.id;
-                    var botApiId = BuildChannelBotApiChatId(rawId);
-                    if (normalizedId != rawId && normalizedId != botApiId)
-                        continue;
+                    {
+                        var rawId = channel.id;
+                        var botApiId = BuildChannelBotApiChatId(rawId);
+                        if (normalizedId != rawId && normalizedId != botApiId)
+                            continue;
 
-                    return new ResolvedChatTarget(
-                        channel.ToInputPeer(),
-                        NormalizeChatTitle(channel.title, rawId.ToString(CultureInfo.InvariantCulture)),
-                        botApiId.ToString(CultureInfo.InvariantCulture));
-                }
+                        return new ResolvedChatTarget(
+                            channel.ToInputPeer(),
+                            NormalizeChatTitle(channel.title, rawId.ToString(CultureInfo.InvariantCulture)),
+                            botApiId.ToString(CultureInfo.InvariantCulture));
+                    }
                 case TL.Chat basic when basic.IsActive:
-                {
-                    var rawId = basic.id;
-                    var negativeId = -rawId;
-                    if (normalizedId != rawId && normalizedId != negativeId)
-                        continue;
+                    {
+                        var rawId = basic.id;
+                        var negativeId = -rawId;
+                        if (normalizedId != rawId && normalizedId != negativeId)
+                            continue;
 
-                    return new ResolvedChatTarget(
-                        basic.ToInputPeer(),
-                        NormalizeChatTitle(basic.title, rawId.ToString(CultureInfo.InvariantCulture)),
-                        rawId.ToString(CultureInfo.InvariantCulture));
-                }
+                        return new ResolvedChatTarget(
+                            basic.ToInputPeer(),
+                            NormalizeChatTitle(basic.title, rawId.ToString(CultureInfo.InvariantCulture)),
+                            rawId.ToString(CultureInfo.InvariantCulture));
+                    }
             }
         }
 
@@ -2027,7 +2027,8 @@ public class AccountTelegramToolsService
             var proxyResolution = await _proxyResolver.ResolveAsync(accountId, cancellationToken);
             var proxy = proxyResolution.Proxy
                 ?? (proxyResolution.UseGlobalProxy
-                    ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                    ? throw new InvalidOperationException(
+                        "全局代理路由未在 Session 转换前解析，已阻止降级为直连")
                     : null);
 
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(

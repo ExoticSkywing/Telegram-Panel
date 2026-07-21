@@ -187,7 +187,17 @@ public sealed partial class ProxyManagementService
         proxy.UpdatedAtUtc = now;
         await _db.SaveChangesAsync(cancellationToken);
 
-        var accountIds = proxy.Accounts.Select(x => x.Id).ToArray();
+        var accountIds = proxy.Accounts.Select(x => x.Id).ToList();
+        if (IsEnabledGlobalProxy(proxy.Id))
+        {
+            var globalAccountIds = await _db.Accounts
+                .AsNoTracking()
+                .Where(x => x.ProxyId == null && x.UseGlobalProxy)
+                .Select(x => x.Id)
+                .ToListAsync(cancellationToken);
+            accountIds.AddRange(globalAccountIds);
+            accountIds = accountIds.Distinct().ToList();
+        }
         await ReleaseClientsAsync(accountIds);
         try
         {

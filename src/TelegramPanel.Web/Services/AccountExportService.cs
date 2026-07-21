@@ -473,9 +473,12 @@ public class AccountExportService
         if (resolution.Proxy != null)
             return resolution.Proxy;
 
-        return resolution.UseGlobalProxy
-            ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
-            : null;
+        if (!resolution.UseGlobalProxy)
+            return null;
+
+        // 兼容旧的显式 AccountProxyResolution 调用方；真实账号解析始终在
+        // AccountProxyResolver 中完成，引用已有代理时禁止读取过期配置快照。
+        return GlobalProxyResolver.ResolveLegacyManualRequired(_configuration);
     }
 
     internal Client CreateIndependentExportClient(

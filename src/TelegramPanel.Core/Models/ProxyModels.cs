@@ -91,7 +91,16 @@ public sealed record OutboundProxyInput(
     bool IsEnabled = true,
     bool TestAfterSave = false,
     bool ClearPassword = false,
-    bool ClearResinAdminToken = false);
+    bool ClearResinAdminToken = false,
+    int? CategoryId = null);
+
+/// <summary>
+/// 代理分类保存输入。
+/// </summary>
+public sealed record ProxyCategoryInput(
+    string? Name,
+    string? Color,
+    string? Description);
 
 /// <summary>
 /// 账号代理绑定输入。
@@ -99,7 +108,10 @@ public sealed record OutboundProxyInput(
 public sealed record AccountProxyBindingInput(
     string Strategy,
     int? ProxyId = null,
-    int? ExpectedProxyId = null);
+    int? ExpectedProxyId = null,
+    // 导入/登录首连使用的冻结快照。正式绑定在代理变更锁内复核，
+    // 防止首条请求走旧出口而落库时绑定到已被编辑的新出口。
+    ProxyConnectionOptions? ExpectedConnection = null);
 
 /// <summary>
 /// 单个账号代理操作结果。

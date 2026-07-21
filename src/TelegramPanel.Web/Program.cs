@@ -50,19 +50,37 @@ if (args.Length >= 2 && string.Equals(args[0], "--diag-session-dir", StringCompa
     var diagConfiguration = new ConfigurationBuilder()
         .AddEnvironmentVariables()
         .Build();
-    ProxyConnectionOptions? diagProxy;
-    try
-    {
-        diagProxy = GlobalTelegramProxyConfiguration.Build(diagConfiguration);
-    }
-    catch (Exception ex)
-    {
-        Console.Error.WriteLine($"诊断代理配置无效：{ex.Message}");
-        return;
-    }
-
     var allowDirect = args.Skip(2)
         .Any(x => string.Equals(x, "--allow-direct", StringComparison.OrdinalIgnoreCase));
+    ProxyConnectionOptions? diagProxy;
+    if (GlobalTelegramProxyConfiguration.GetSourceMode(diagConfiguration)
+        == GlobalTelegramProxyConfiguration.ExistingSourceMode)
+    {
+        var selectedProxyId = GlobalTelegramProxyConfiguration.GetSelectedProxyId(
+            diagConfiguration,
+            requireEnabled: false);
+        Console.Error.WriteLine(
+            $"诊断配置引用已有代理 #{selectedProxyId?.ToString() ?? "未选择"}，"
+            + "但独立诊断模式不会在应用启动前读取代理数据库。"
+            + "请改用 Telegram__Proxy__SourceMode=manual 并提供 Server/Port，"
+            + "或明确追加 --allow-direct 承担公网 IP 暴露风险。");
+        if (!allowDirect)
+            return;
+        diagProxy = null;
+    }
+    else
+    {
+        try
+        {
+            diagProxy = GlobalTelegramProxyConfiguration.Build(diagConfiguration);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"诊断代理配置无效：{ex.Message}");
+            return;
+        }
+    }
+
     if (diagProxy == null && !allowDirect)
     {
         Console.Error.WriteLine(

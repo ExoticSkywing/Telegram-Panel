@@ -42,6 +42,7 @@ import type {
   GroupDetail,
   GroupListItem,
   GlobalProxySettings,
+  ProxyCategory,
   SaveGlobalProxySettingsRequest,
   LinkResult,
   OperationAccount,
@@ -101,6 +102,15 @@ export const panelApi = {
   summary: () => api.get<DashboardSummary>('/summary').then((r) => r.data),
   networkEgress: () => api.get<NetworkEgress>('/network/egress').then((r) => r.data),
   proxies: () => api.get<OutboundProxy[]>('/proxies').then((r) => r.data),
+  proxyCategories: () => api.get<ProxyCategory[]>('/proxy-categories').then((r) => r.data),
+  createProxyCategory: (payload: { name: string; color?: string | null; description?: string | null }) =>
+    api.post<ProxyCategory>('/proxy-categories', payload).then((r) => r.data),
+  updateProxyCategory: (id: number, payload: { name: string; color?: string | null; description?: string | null }) =>
+    api.put<ProxyCategory>(`/proxy-categories/${id}`, payload).then((r) => r.data),
+  deleteProxyCategory: (id: number) =>
+    api.delete<OperationResult>(`/proxy-categories/${id}`).then((r) => r.data),
+  batchSetProxyCategory: (proxyIds: number[], categoryId: number | null) =>
+    api.post<OperationResult>('/proxies/batch/category', { proxyIds, categoryId }).then((r) => r.data),
   createProxy: (payload: SaveOutboundProxyRequest) =>
     api.post<OutboundProxy>('/proxies', payload, { timeout: PROXY_SAVE_TIMEOUT_MS }).then((r) => r.data),
   updateProxy: (id: number, payload: SaveOutboundProxyRequest) =>

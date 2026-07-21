@@ -1135,7 +1135,8 @@ public class GroupService : IGroupService
             var proxyResolution = await _proxyResolver.ResolveAsync(accountId, cancellationToken);
             var proxy = proxyResolution.Proxy
                 ?? (proxyResolution.UseGlobalProxy
-                    ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                    ? throw new InvalidOperationException(
+                        "全局代理路由未在 Session 转换前解析，已阻止降级为直连")
                     : null);
 
             var converted = await SessionDataConverter.TryConvertSqliteSessionFromJsonAsync(

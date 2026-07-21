@@ -540,11 +540,42 @@ public sealed class AccountLoginProxyCoordinator
 
             case "global":
                 {
-                    var globalProxy = GlobalTelegramProxyConfiguration.Build(_configuration)
-                                      ?? throw new InvalidOperationException(
-                                          "Telegram 全局代理尚未配置；请选择已有代理、一键创建 WARP，或明确选择直连");
+                    var selectedGlobalId = _proxyManagement.GetEnabledGlobalProxyId();
+                    var selectedGlobal = selectedGlobalId is > 0
+                        ? await _proxyManagement.GetAsync(
+                            selectedGlobalId.Value,
+                            cancellationToken: cancellationToken)
+                        : null;
+                    if (selectedGlobalId is > 0 && selectedGlobal is not { IsEnabled: true })
+                        throw new InvalidOperationException("全局代理引用的已有代理不存在或已停用");
+                    if (selectedGlobal?.Kind == OutboundProxyKinds.Warp
+                        && _temporaryWarpClaims.OwnsRequest(selectedGlobal.WarpProfile?.RequestId))
+                    {
+                        throw new InvalidOperationException(
+                            "全局 WARP 正被另一个账号首次连接流程使用，请稍后重试");
+                    }
+
+                    temporaryResinKey = selectedGlobal?.Kind == OutboundProxyKinds.Resin
+                        ? $"tg_login_{loginId}_{Guid.NewGuid():N}"
+                        : null;
+                    var stableLoginKey = temporaryResinKey ?? $"tg_login_{loginId}";
+                    var globalProxy = selectedGlobal == null
+                        ? await _proxyManagement.ResolveGlobalProxyRequiredAsync(
+                            stableLoginKey,
+                            cancellationToken)
+                        : AccountProxyResolver.BuildConnectionOptions(
+                            selectedGlobal,
+                            stableLoginKey);
+                    if (selectedGlobal?.Kind == OutboundProxyKinds.Resin)
+                    {
+                        resinLease = new ResinLeaseControlSnapshot(
+                            selectedGlobal.Id,
+                            selectedGlobal.ResinAdminUrl,
+                            selectedGlobal.ResinAdminToken,
+                            selectedGlobal.ResinPlatform);
+                    }
                     binding = new AccountProxyBindingInput("global");
-                    // 使用当前配置快照，而不是让临时登录 ID 再次动态解析全局设置。
+                    // 使用当前配置/数据库快照，而不是让临时登录 ID 再次动态解析全局设置。
                     resolution = new AccountProxyResolution(globalProxy, false);
                     break;
                 }
@@ -699,7 +730,8 @@ public sealed class AccountLoginProxyCoordinator
             var bindingResult = await _proxyManagement.BindAccountsAsync(
                 new[] { accountId },
                 state.Binding,
-                cancellationToken);
+                cancellationToken,
+                expectedConnection: state.Resolution.Proxy);
             var item = bindingResult.Items.FirstOrDefault(x => x.AccountId == accountId);
             if (item?.Success != true)
             {
@@ -908,7 +940,9 @@ public sealed class AccountLoginProxyCoordinator
         ProxyConnectionOptions? current;
         if (strategy == "global")
         {
-            current = GlobalTelegramProxyConfiguration.Build(_configuration);
+            current = await _proxyManagement.ResolveGlobalProxyAsync(
+                state.TemporaryResinKey ?? $"tg_login_{state.LoginId}",
+                cancellationToken);
         }
         else if (strategy == "existing" && state.Binding.ProxyId is > 0)
         {

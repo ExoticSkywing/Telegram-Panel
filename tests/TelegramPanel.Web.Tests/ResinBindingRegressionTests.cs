@@ -845,15 +845,166 @@ public sealed class ResinBindingRegressionTests
         Assert.Contains("超过 1024KB 限制", proxy.LastError);
     }
 
+    [Fact]
+    public async Task 全局Resin账号切换直连会释放稳定Lease()
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = NewGlobalResinProxy(resin);
+        var account = NewGlobalAccount("8613800000201", 10201);
+        db.AddRange(proxy, account);
+        await db.SaveChangesAsync();
+        var configuration = GlobalResinConfiguration(proxy.Id);
+
+        var result = await CreateProxyService(
+                db,
+                configuration: configuration)
+            .BindAccountsAsync(
+                new[] { account.Id },
+                new AccountProxyBindingInput("direct"));
+
+        Assert.Equal(1, result.Success);
+        var switched = await db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Null(switched.ProxyId);
+        Assert.False(switched.UseGlobalProxy);
+        Assert.Contains(
+            $"DELETE /api/v1/platforms/default-id/leases/tg_account_{account.Id} HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task 删除全局Resin账号会释放稳定Lease()
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = NewGlobalResinProxy(resin);
+        var account = NewGlobalAccount("8613800000202", 10202);
+        db.AddRange(proxy, account);
+        await db.SaveChangesAsync();
+        var configuration = GlobalResinConfiguration(proxy.Id);
+        var pool = new NoopClientPool();
+        var proxyService = CreateProxyService(db, pool, configuration);
+        var accountService = new AccountManagementService(
+            new AccountRepository(db),
+            new ChannelRepository(db),
+            new GroupRepository(db),
+            pool,
+            configuration,
+            NullLogger<AccountManagementService>.Instance,
+            proxyService,
+            new SessionPathResolver(configuration));
+
+        await accountService.DeleteAccountAsync(account.Id);
+
+        Assert.False(await db.Accounts.AnyAsync());
+        Assert.Contains(
+            $"DELETE /api/v1/platforms/default-id/leases/tg_account_{account.Id} HTTP/1.1",
+            resin.Requests);
+    }
+
+    [Fact]
+    public async Task 关闭全局Resin会先释放全部Lease再提交配置并恢复账号()
+    {
+        await using var resin = new ResinControlPlaneStub();
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = NewGlobalResinProxy(resin);
+        var first = NewGlobalAccount("8613800000203", 10203);
+        var second = NewGlobalAccount("8613800000204", 10204);
+        db.AddRange(proxy, first, second);
+        await db.SaveChangesAsync();
+        var configuration = GlobalResinConfiguration(proxy.Id);
+        var service = CreateProxyService(db, configuration: configuration);
+        var applied = false;
+
+        await service.ExecuteGlobalProxyChangeAsync(
+            nextEnabled: false,
+            nextSourceMode: GlobalTelegramProxyConfiguration.ExistingSourceMode,
+            nextProxyId: proxy.Id,
+            async _ =>
+            {
+                Assert.All(
+                    await db.Accounts.AsNoTracking().ToListAsync(),
+                    item => Assert.False(item.IsActive));
+                applied = true;
+                configuration["Telegram:Proxy:Enabled"] = "false";
+            });
+
+        Assert.True(applied);
+        Assert.Equal(2, resin.Requests.Count(request => request.StartsWith(
+            "DELETE /api/v1/platforms/default-id/leases/tg_account_",
+            StringComparison.Ordinal)));
+        Assert.All(
+            await db.Accounts.AsNoTracking().ToListAsync(),
+            item => Assert.True(item.IsActive));
+        Assert.False(GlobalTelegramProxyConfiguration.IsEnabled(configuration));
+    }
+
+    [Fact]
+    public async Task 全局Resin释放失败时不会提交新配置并保持账号停用()
+    {
+        await using var resin = new ResinControlPlaneStub(HttpStatusCode.ServiceUnavailable);
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        var proxy = NewGlobalResinProxy(resin);
+        var account = NewGlobalAccount("8613800000205", 10205);
+        db.AddRange(proxy, account);
+        await db.SaveChangesAsync();
+        var configuration = GlobalResinConfiguration(proxy.Id);
+        var applied = false;
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            CreateProxyService(db, configuration: configuration)
+                .ExecuteGlobalProxyChangeAsync(
+                    nextEnabled: false,
+                    nextSourceMode: GlobalTelegramProxyConfiguration.ExistingSourceMode,
+                    nextProxyId: proxy.Id,
+                    _ =>
+                    {
+                        applied = true;
+                        configuration["Telegram:Proxy:Enabled"] = "false";
+                        return Task.CompletedTask;
+                    }));
+
+        Assert.Contains("Resin Lease", error.Message);
+        Assert.False(applied);
+        Assert.True(GlobalTelegramProxyConfiguration.IsEnabled(configuration));
+        Assert.False((await db.Accounts.AsNoTracking().SingleAsync()).IsActive);
+    }
+
     private static ProxyManagementService CreateProxyService(
         AppDbContext db,
-        ITelegramClientPool? pool = null)
+        ITelegramClientPool? pool = null,
+        IConfiguration? configuration = null)
     {
         pool ??= new NoopClientPool();
+        configuration ??= new ConfigurationBuilder().Build();
         var probe = new ProxyEgressProbeService();
         var warp = new WarpContainerManager(
             db,
-            new ConfigurationBuilder().Build(),
+            configuration,
             probe,
             NullLogger<WarpContainerManager>.Instance);
         return new ProxyManagementService(
@@ -861,7 +1012,45 @@ public sealed class ResinBindingRegressionTests
             pool,
             probe,
             warp,
-            NullLogger<ProxyManagementService>.Instance);
+            NullLogger<ProxyManagementService>.Instance,
+            configuration);
+    }
+
+    private static OutboundProxy NewGlobalResinProxy(ResinControlPlaneStub resin) => new()
+    {
+        Name = "resin-global",
+        Kind = OutboundProxyKinds.Resin,
+        Protocol = OutboundProxyProtocols.Http,
+        Host = "127.0.0.1",
+        Port = 8080,
+        ResinPlatform = "Default",
+        ResinAdminUrl = resin.BaseAddress.AbsoluteUri,
+        ResinAdminToken = "admin-token",
+        IsEnabled = true,
+        TestStatus = "unknown"
+    };
+
+    private static Account NewGlobalAccount(string phone, long userId) => new()
+    {
+        Phone = phone,
+        UserId = userId,
+        SessionPath = $"sessions/{phone}.session",
+        ApiId = 1,
+        ApiHash = "hash",
+        UseGlobalProxy = true,
+        IsActive = true
+    };
+
+    private static ConfigurationManager GlobalResinConfiguration(int proxyId)
+    {
+        var configuration = new ConfigurationManager();
+        configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Telegram:Proxy:Enabled"] = "true",
+            ["Telegram:Proxy:SourceMode"] = GlobalTelegramProxyConfiguration.ExistingSourceMode,
+            ["Telegram:Proxy:ProxyId"] = proxyId.ToString()
+        });
+        return configuration;
     }
 
     private static OutboundProxyInput NewResinInput(string platform) => new(

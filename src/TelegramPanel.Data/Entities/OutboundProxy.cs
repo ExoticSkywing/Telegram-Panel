@@ -6,6 +6,7 @@ namespace TelegramPanel.Data.Entities;
 public class OutboundProxy
 {
     public int Id { get; set; }
+    public int? CategoryId { get; set; }
     public string Name { get; set; } = null!;
     public string Kind { get; set; } = "manual";
     public string Protocol { get; set; } = "socks5";
@@ -31,6 +32,7 @@ public class OutboundProxy
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 
     // 导航属性
+    public ProxyCategory? Category { get; set; }
     public ICollection<Account> Accounts { get; set; } = new List<Account>();
     public WarpProfile? WarpProfile { get; set; }
 }

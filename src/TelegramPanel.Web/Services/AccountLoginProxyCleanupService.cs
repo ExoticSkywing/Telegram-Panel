@@ -126,8 +126,14 @@ public sealed class AccountLoginProxyCleanupService : BackgroundService
         var proxyManagement = scope.ServiceProvider
             .GetRequiredService<ProxyManagementService>();
         var proxies = await proxyManagement.ListAsync(cancellationToken);
+        var globalProxyId = proxyManagement.GetEnabledGlobalProxyId();
         var orphanIds = proxies
-            .Where(proxy => IsRestartOrphan(proxy, cutoffUtc, _store, _temporaryWarpClaims))
+            .Where(proxy => IsRestartOrphan(
+                proxy,
+                cutoffUtc,
+                _store,
+                _temporaryWarpClaims,
+                globalProxyId))
             .Select(proxy => proxy.Id)
             .ToArray();
 
@@ -150,7 +156,8 @@ public sealed class AccountLoginProxyCleanupService : BackgroundService
                         candidate,
                         cutoffUtc,
                         _store,
-                        _temporaryWarpClaims))
+                        _temporaryWarpClaims,
+                        globalProxyId))
                 {
                     continue;
                 }
@@ -182,12 +189,14 @@ public sealed class AccountLoginProxyCleanupService : BackgroundService
         OutboundProxy proxy,
         DateTimeOffset cutoffUtc,
         AccountLoginProxyStateStore store,
-        TemporaryWarpClaimStore temporaryWarpClaims)
+        TemporaryWarpClaimStore temporaryWarpClaims,
+        int? globalProxyId = null)
     {
         ArgumentNullException.ThrowIfNull(proxy);
         ArgumentNullException.ThrowIfNull(store);
         ArgumentNullException.ThrowIfNull(temporaryWarpClaims);
         return proxy.Kind == OutboundProxyKinds.Warp
+               && proxy.Id != globalProxyId
                && proxy.Accounts.Count == 0
                && proxy.WarpProfile?.RequestId is { } requestId
                && (AccountLoginProxyCoordinator.IsManagedWarpRequestId(requestId)

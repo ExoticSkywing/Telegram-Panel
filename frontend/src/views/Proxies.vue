@@ -49,7 +49,7 @@
           type="success"
           :icon="MagicStick"
           :disabled="warpUnavailable || refreshingAllWarps"
-          @click="openWarpCreate"
+          @click="openWarpCreate()"
         >
           一键创建 WARP
         </el-button>
@@ -113,72 +113,147 @@
         type="info"
         :closable="false"
         show-icon
-        title="这是账号选择“全局代理”时使用的统一出口"
-        description="保存后会清理现有 Telegram 客户端连接；账号下次连接会从一开始使用新代理，不会先直连再切换。账号专属代理仍然优先。"
+        title="未绑定账号专属代理的账号默认使用这里的全局出口"
+        description="账号明确选择直连时除外；账号专属代理优先。保存后会清理现有 Telegram 客户端连接，下次连接从一开始使用新代理，不会先直连再切换。"
       />
       <el-form :model="globalProxyDialog.form" label-position="top" :disabled="globalProxyDialog.saving">
         <el-switch v-model="globalProxyDialog.form.enabled" active-text="启用账号全局代理" />
         <template v-if="globalProxyDialog.form.enabled">
-          <el-form-item label="代理协议" class="mt-3" required>
-            <el-radio-group v-model="globalProxyDialog.form.protocol">
-              <el-radio-button value="http">HTTP</el-radio-button>
-              <el-radio-button value="socks5">SOCKS5</el-radio-button>
-              <el-radio-button value="mtproto">MTProxy</el-radio-button>
+          <el-form-item label="配置方式" class="mt-3" required>
+            <el-radio-group v-model="globalProxyDialog.form.sourceMode">
+              <el-radio-button value="existing">从已有代理选择</el-radio-button>
+              <el-radio-button value="manual">手动配置</el-radio-button>
             </el-radio-group>
           </el-form-item>
-          <div class="form-grid">
-            <el-form-item label="代理主机" required>
-              <el-input v-model="globalProxyDialog.form.server" maxlength="253" placeholder="proxy.example.com" />
-            </el-form-item>
-            <el-form-item label="端口" required>
-              <el-input-number
-                v-model="globalProxyDialog.form.port"
-                :min="1"
-                :max="65535"
-                controls-position="right"
+
+          <template v-if="globalProxyDialog.form.sourceMode === 'existing'">
+            <el-form-item label="已有代理" required>
+              <el-select
+                v-model="globalProxyDialog.form.proxyId"
                 class="full"
-              />
-            </el-form-item>
-            <el-form-item v-if="globalProxyDialog.form.protocol !== 'mtproto'" label="用户名">
-              <el-input
-                v-model="globalProxyDialog.form.username"
-                autocomplete="off"
-                maxlength="255"
-                placeholder="留空表示不使用用户名"
-              />
-            </el-form-item>
-            <el-form-item v-if="globalProxyDialog.form.protocol !== 'mtproto'" label="密码">
-              <div class="credential-field">
-                <el-input
-                  v-model="globalProxyDialog.form.password"
-                  type="password"
-                  show-password
-                  autocomplete="new-password"
-                  maxlength="255"
-                  :disabled="globalProxyDialog.form.clearPassword"
-                  :placeholder="globalProxyDialog.hasPassword
-                    ? '留空保持原密码'
-                    : '留空表示不使用密码'"
-                />
-                <el-checkbox
-                  v-if="globalProxyDialog.hasPassword"
-                  v-model="globalProxyDialog.form.clearPassword"
+                filterable
+                placeholder="选择普通代理、Resin 或 WARP"
+              >
+                <el-option-group
+                  v-for="group in globalProxyGroups"
+                  :key="group.kind"
+                  :label="group.label"
                 >
-                  清除已保存的密码
-                </el-checkbox>
-              </div>
+                  <el-option
+                    v-for="proxy in group.items"
+                    :key="proxy.id"
+                    :label="`${proxy.name} · ${protocolLabel(proxy.protocol)} · ${proxy.host}:${proxy.port}`"
+                    :value="proxy.id"
+                    :disabled="!proxy.isEnabled"
+                  />
+                </el-option-group>
+              </el-select>
             </el-form-item>
-          </div>
-          <el-form-item v-if="globalProxyDialog.form.protocol === 'mtproto'" label="MTProxy Secret" required>
-            <el-input
-              v-model="globalProxyDialog.form.secret"
-              type="password"
-              show-password
-              autocomplete="new-password"
-              maxlength="500"
-              :placeholder="globalProxyDialog.hasSecret ? '留空保持原 Secret' : '请输入 MTProxy Secret'"
+            <div v-if="globalSelectedProxy" class="selected-proxy-summary">
+              <div class="selected-proxy-heading">
+                <el-tag :type="kindTagType(globalSelectedProxy.kind)" size="small">
+                  {{ kindLabel(globalSelectedProxy.kind) }}
+                </el-tag>
+                <strong>{{ globalSelectedProxy.name }}</strong>
+                <el-tag v-if="globalSelectedProxy.category" size="small" effect="plain">
+                  {{ globalSelectedProxy.category.name }}
+                </el-tag>
+              </div>
+              <div class="cell-sub monospace">{{ globalSelectedProxy.host }}:{{ globalSelectedProxy.port }}</div>
+              <div class="cell-sub">
+                出口 IP：{{ egressIpText(globalSelectedProxy) }}
+                <span v-if="globalSelectedProxy.egressCountry || globalSelectedProxy.egressCity">
+                  · {{ [globalSelectedProxy.egressCountry, globalSelectedProxy.egressCity].filter(Boolean).join(' / ') }}
+                </span>
+              </div>
+            </div>
+            <el-alert
+              v-else-if="proxies.length === 0"
+              type="warning"
+              :closable="false"
+              title="还没有可选代理，请先创建 WARP、Resin 或普通代理"
             />
-          </el-form-item>
+            <div class="global-proxy-actions">
+              <el-button
+                type="success"
+                plain
+                :icon="MagicStick"
+                :disabled="warpUnavailable"
+                @click="openWarpCreateForGlobal()"
+              >
+                一键创建 WARP
+              </el-button>
+              <el-button plain :icon="CirclePlus" @click="openProxyCreateForGlobal('resin')">
+                新增 Resin
+              </el-button>
+              <el-button plain :icon="CirclePlus" @click="openProxyCreateForGlobal('manual')">
+                新增普通代理
+              </el-button>
+            </div>
+          </template>
+
+          <template v-else>
+            <el-form-item label="代理协议" required>
+              <el-radio-group v-model="globalProxyDialog.form.protocol">
+                <el-radio-button value="http">HTTP</el-radio-button>
+                <el-radio-button value="socks5">SOCKS5</el-radio-button>
+                <el-radio-button value="mtproto">MTProxy</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <div class="form-grid">
+              <el-form-item label="代理主机" required>
+                <el-input v-model="globalProxyDialog.form.server" maxlength="253" placeholder="proxy.example.com" />
+              </el-form-item>
+              <el-form-item label="端口" required>
+                <el-input-number
+                  v-model="globalProxyDialog.form.port"
+                  :min="1"
+                  :max="65535"
+                  controls-position="right"
+                  class="full"
+                />
+              </el-form-item>
+              <el-form-item v-if="globalProxyDialog.form.protocol !== 'mtproto'" label="用户名">
+                <el-input
+                  v-model="globalProxyDialog.form.username"
+                  autocomplete="off"
+                  maxlength="255"
+                  placeholder="留空表示不使用用户名"
+                />
+              </el-form-item>
+              <el-form-item v-if="globalProxyDialog.form.protocol !== 'mtproto'" label="密码">
+                <div class="credential-field">
+                  <el-input
+                    v-model="globalProxyDialog.form.password"
+                    type="password"
+                    show-password
+                    autocomplete="new-password"
+                    maxlength="255"
+                    :disabled="globalProxyDialog.form.clearPassword"
+                    :placeholder="globalProxyDialog.hasPassword
+                      ? '留空保持原密码'
+                      : '留空表示不使用密码'"
+                  />
+                  <el-checkbox
+                    v-if="globalProxyDialog.hasPassword"
+                    v-model="globalProxyDialog.form.clearPassword"
+                  >
+                    清除已保存的密码
+                  </el-checkbox>
+                </div>
+              </el-form-item>
+            </div>
+            <el-form-item v-if="globalProxyDialog.form.protocol === 'mtproto'" label="MTProxy Secret" required>
+              <el-input
+                v-model="globalProxyDialog.form.secret"
+                type="password"
+                show-password
+                autocomplete="new-password"
+                maxlength="500"
+                :placeholder="globalProxyDialog.hasSecret ? '留空保持原 Secret' : '请输入 MTProxy Secret'"
+              />
+            </el-form-item>
+          </template>
         </template>
         <el-alert
           v-else
@@ -197,7 +272,61 @@
     </el-dialog>
 
     <el-card shadow="never" class="page-card mt-4">
-      <el-table v-loading="loading" :data="proxies" stripe row-key="id" class="proxy-table">
+      <div class="proxy-list-header">
+        <el-tabs v-model="usageFilter" class="usage-tabs">
+          <el-tab-pane name="all">
+            <template #label>
+              <span class="usage-tab-label">全部 <strong>{{ usageCounts.all }}</strong></span>
+            </template>
+          </el-tab-pane>
+          <el-tab-pane name="used">
+            <template #label>
+              <span class="usage-tab-label">使用中 <strong>{{ usageCounts.used }}</strong></span>
+            </template>
+          </el-tab-pane>
+          <el-tab-pane name="unused">
+            <template #label>
+              <span class="usage-tab-label">未使用 <strong>{{ usageCounts.unused }}</strong></span>
+            </template>
+          </el-tab-pane>
+        </el-tabs>
+        <div class="proxy-list-actions">
+          <el-select
+            v-model="categoryFilter"
+            class="category-filter"
+            :loading="proxyCategoryLoading"
+            placeholder="代理分类"
+          >
+            <el-option label="全部分类" value="all" />
+            <el-option label="未分类" value="uncategorized" />
+            <el-option
+              v-for="category in proxyCategories"
+              :key="category.id"
+              :label="category.name"
+              :value="category.id"
+            />
+          </el-select>
+          <el-button
+            :icon="CollectionTag"
+            :disabled="selectedProxies.length === 0"
+            @click="openBatchCategory"
+          >
+            设置分类<span v-if="selectedProxies.length">（{{ selectedProxies.length }}）</span>
+          </el-button>
+          <el-button :icon="FolderOpened" @click="openCategoryManager">管理分类</el-button>
+        </div>
+      </div>
+
+      <el-table
+        ref="proxyTableRef"
+        v-loading="loading"
+        :data="filteredProxies"
+        stripe
+        row-key="id"
+        class="proxy-table"
+        @selection-change="onProxySelectionChange"
+      >
+        <el-table-column type="selection" width="46" :reserve-selection="true" />
         <el-table-column label="名称" min-width="150">
           <template #default="{ row }">
             <div class="cell-main">{{ row.name }}</div>
@@ -211,6 +340,19 @@
         </el-table-column>
         <el-table-column label="协议" width="100">
           <template #default="{ row }">{{ protocolLabel(row.protocol) }}</template>
+        </el-table-column>
+        <el-table-column label="分类" min-width="110">
+          <template #default="{ row }">
+            <el-tag
+              v-if="row.category"
+              size="small"
+              effect="plain"
+              :style="categoryTagStyle(row.category)"
+            >
+              {{ row.category.name }}
+            </el-tag>
+            <span v-else class="cell-sub">未分类</span>
+          </template>
         </el-table-column>
         <el-table-column label="代理地址" min-width="190">
           <template #default="{ row }">
@@ -233,11 +375,22 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="公网出口 IP" min-width="210">
+        <el-table-column label="公网出口 IP" min-width="260">
           <template #default="{ row }">
-            <div class="monospace">{{ egressIpText(row) }}</div>
-            <div v-if="row.egressIp" class="cell-sub">
-              {{ egressIpMeta(row) }}
+            <div class="egress-detail">
+              <span class="egress-field-label">IP</span>
+              <span class="monospace">{{ egressIpText(row) }}</span>
+              <el-tag v-if="row.egressIp" size="small" effect="plain">
+                {{ egressIpVersion(row) }}
+              </el-tag>
+            </div>
+            <div v-if="row.egressIp" class="egress-detail cell-sub">
+              <span class="egress-field-label">地区</span>
+              <span>{{ [row.egressCountry, row.egressCity].filter(Boolean).join(' / ') || '未知' }}</span>
+            </div>
+            <div v-if="row.egressIp" class="egress-detail cell-sub">
+              <span class="egress-field-label">ISP</span>
+              <span>{{ row.egressIsp || '未知' }}</span>
             </div>
             <el-tag
               v-if="row.kind === 'warp'"
@@ -267,8 +420,14 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="绑定账号" width="94" align="center">
-          <template #default="{ row }">{{ row.accountCount ?? 0 }}</template>
+        <el-table-column label="使用情况" width="110" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.isGlobal" type="warning" size="small">全局</el-tag>
+            <el-tag :type="proxyIsUsed(row) ? 'success' : 'info'" size="small">
+              {{ proxyIsUsed(row) ? '使用中' : '未使用' }}
+            </el-tag>
+            <div class="cell-sub">{{ proxyUsageCount(row) }} 个账号</div>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="158" fixed="right">
           <template #default="{ row }">
@@ -320,16 +479,108 @@
           </template>
         </el-table-column>
         <template #empty>
-          <el-empty description="暂无代理" />
+          <el-empty :description="proxies.length ? '当前筛选下没有代理' : '暂无代理'" />
         </template>
       </el-table>
     </el-card>
+
+    <el-dialog
+      v-model="batchCategoryDialog.visible"
+      title="批量设置代理分类"
+      width="min(440px, calc(100vw - 24px))"
+      :close-on-click-modal="!batchCategoryDialog.saving"
+      :close-on-press-escape="!batchCategoryDialog.saving"
+      :show-close="!batchCategoryDialog.saving"
+    >
+      <el-form label-position="top" :disabled="batchCategoryDialog.saving">
+        <el-form-item :label="`已选择 ${batchCategoryDialog.proxyIds.length} 个代理`">
+          <el-select v-model="batchCategoryDialog.categoryId" class="full" clearable placeholder="未分类">
+            <el-option
+              v-for="category in proxyCategories"
+              :key="category.id"
+              :label="category.name"
+              :value="category.id"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="batchCategoryDialog.saving" @click="batchCategoryDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="batchCategoryDialog.saving" @click="saveBatchCategory">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="categoryManagerDialog.visible"
+      title="代理分类管理"
+      width="min(620px, calc(100vw - 24px))"
+    >
+      <div class="category-manager-toolbar">
+        <el-button type="primary" :icon="CirclePlus" @click="openCategoryEditor()">新增分类</el-button>
+      </div>
+      <el-table v-loading="categoryManagerDialog.loading" :data="proxyCategories" row-key="id" max-height="420">
+        <el-table-column label="分类" min-width="160">
+          <template #default="{ row }">
+            <el-tag size="small" effect="plain" :style="categoryTagStyle(row)">{{ row.name }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="description" label="说明" min-width="200">
+          <template #default="{ row }">{{ row.description || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="代理数" width="90" align="center">
+          <template #default="{ row }">{{ categoryProxyCount(row) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="100" align="right">
+          <template #default="{ row }">
+            <el-button link type="primary" :icon="Edit" title="编辑分类" @click="openCategoryEditor(row)" />
+            <el-button link type="danger" :icon="Delete" title="删除分类" @click="removeCategory(row)" />
+          </template>
+        </el-table-column>
+        <template #empty>
+          <el-empty description="暂无分类" />
+        </template>
+      </el-table>
+    </el-dialog>
+
+    <el-dialog
+      v-model="categoryEditorDialog.visible"
+      :title="categoryEditorDialog.id ? '编辑代理分类' : '新增代理分类'"
+      width="min(440px, calc(100vw - 24px))"
+      append-to-body
+      :close-on-click-modal="!categoryEditorDialog.saving"
+      :close-on-press-escape="!categoryEditorDialog.saving"
+      :show-close="!categoryEditorDialog.saving"
+      @closed="resetCategoryEditor"
+    >
+      <el-form :model="categoryEditorDialog.form" label-position="top" :disabled="categoryEditorDialog.saving">
+        <el-form-item label="分类名称" required>
+          <el-input v-model="categoryEditorDialog.form.name" maxlength="40" placeholder="例如：美国住宅" />
+        </el-form-item>
+        <el-form-item label="标签颜色">
+          <el-color-picker v-model="categoryEditorDialog.form.color" />
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input
+            v-model="categoryEditorDialog.form.description"
+            type="textarea"
+            :rows="3"
+            maxlength="200"
+            show-word-limit
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :disabled="categoryEditorDialog.saving" @click="categoryEditorDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="categoryEditorDialog.saving" @click="saveCategory">保存</el-button>
+      </template>
+    </el-dialog>
 
     <el-dialog
       v-model="proxyDialog.visible"
       class="proxy-editor-dialog"
       :title="proxyDialog.id ? '编辑代理' : '新增代理'"
       width="min(620px, calc(100vw - 24px))"
+      append-to-body
       :before-close="beforeProxyDialogClose"
       :close-on-click-modal="!proxyDialog.saving"
       :close-on-press-escape="!proxyDialog.saving"
@@ -346,6 +597,16 @@
         <div class="form-grid">
           <el-form-item label="名称" prop="name" required>
             <el-input v-model="proxyDialog.form.name" maxlength="80" placeholder="例如：香港 Socks5" />
+          </el-form-item>
+          <el-form-item label="分类">
+            <el-select v-model="proxyDialog.form.categoryId" class="full" clearable filterable placeholder="未分类">
+              <el-option
+                v-for="category in proxyCategories"
+                :key="category.id"
+                :label="category.name"
+                :value="category.id"
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="协议" prop="protocol" required>
             <el-select v-model="proxyDialog.form.protocol" class="full">
@@ -488,6 +749,7 @@
       v-model="warpDialog.visible"
       title="一键创建 WARP"
       width="min(500px, calc(100vw - 24px))"
+      append-to-body
       :before-close="beforeWarpDialogClose"
       :close-on-click-modal="!warpDialog.creating"
       :close-on-press-escape="!warpDialog.creating"
@@ -525,7 +787,7 @@
         />
       </el-form>
       <template #footer>
-        <el-button :disabled="warpDialog.creating" @click="warpDialog.visible = false">取消</el-button>
+        <el-button :disabled="warpDialog.creating" @click="closeWarpDialog">取消</el-button>
         <el-button type="success" :loading="warpDialog.creating" @click="createWarp">创建</el-button>
       </template>
     </el-dialog>
@@ -537,8 +799,10 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   CirclePlus,
+  CollectionTag,
   Delete,
   Edit,
+  FolderOpened,
   MagicStick,
   Refresh,
   RefreshRight,
@@ -551,8 +815,10 @@ import type {
   GlobalProxySettings,
   NetworkEgress,
   OutboundProxy,
+  ProxyCategory,
   ProxyKind,
   ProxyProtocol,
+  GlobalProxySourceMode,
   SaveOutboundProxyRequest,
   SaveGlobalProxySettingsRequest,
   WarpProxyProtocol,
@@ -564,6 +830,11 @@ import { ipVersionLabel, isWarpConnected, warpStatusLabel } from '@/utils/networ
 const loading = ref(false)
 const egressLoading = ref(false)
 const proxies = ref<OutboundProxy[]>([])
+const proxyCategories = ref<ProxyCategory[]>([])
+const usageFilter = ref<'all' | 'used' | 'unused'>('all')
+const categoryFilter = ref<number | 'all' | 'uncategorized'>('all')
+const selectedProxies = ref<OutboundProxy[]>([])
+const proxyTableRef = ref<{ clearSelection: () => void } | null>(null)
 const panelEgress = ref<NetworkEgress | null>(null)
 const panelEgressError = ref('')
 const globalProxy = ref<GlobalProxySettings | null>(null)
@@ -571,6 +842,7 @@ const globalProxyLoading = ref(false)
 const globalProxyError = ref('')
 const warpStatus = ref<WarpRuntimeStatus | null>(null)
 const warpStatusError = ref('')
+const proxyCategoryLoading = ref(false)
 const testingIds = reactive(new Set<number>())
 const refreshingIds = reactive(new Set<number>())
 const deletingIds = reactive(new Set<number>())
@@ -589,6 +861,8 @@ type DialogCloseDone = () => void
 
 const blankGlobalProxyForm = (): SaveGlobalProxySettingsRequest => ({
   enabled: false,
+  sourceMode: 'existing',
+  proxyId: null,
   protocol: 'socks5',
   server: '',
   port: 1080,
@@ -606,6 +880,29 @@ const globalProxyDialog = reactive({
   form: blankGlobalProxyForm(),
 })
 
+const batchCategoryDialog = reactive({
+  visible: false,
+  saving: false,
+  categoryId: null as number | null,
+  proxyIds: [] as number[],
+})
+
+const categoryManagerDialog = reactive({
+  visible: false,
+  loading: false,
+})
+
+const categoryEditorDialog = reactive({
+  visible: false,
+  saving: false,
+  id: null as number | null,
+  form: {
+    name: '',
+    color: '#409eff' as string | null,
+    description: '',
+  },
+})
+
 const blankProxyForm = (): SaveOutboundProxyRequest => ({
   name: '',
   kind: 'manual',
@@ -620,6 +917,7 @@ const blankProxyForm = (): SaveOutboundProxyRequest => ({
   resinAdminUrl: '',
   resinAdminToken: '',
   clearResinAdminToken: false,
+  categoryId: null,
   isEnabled: true,
   testAfterSave: true,
 })
@@ -631,6 +929,7 @@ const proxyDialog = reactive({
   hasPassword: false,
   hasSecret: false,
   hasResinAdminToken: false,
+  selectForGlobal: false,
   form: blankProxyForm(),
 })
 
@@ -647,6 +946,7 @@ const warpDialog = reactive({
   name: '',
   requestId: '',
   protocol: 'http' as WarpProxyProtocol,
+  selectForGlobal: false,
 })
 
 const warpUnavailable = computed(() => !warpStatus.value
@@ -656,15 +956,47 @@ const warpUnavailable = computed(() => !warpStatus.value
 
 const maintenance = computed(() => warpStatus.value?.maintenance ?? null)
 const hasEnabledWarp = computed(() => proxies.value.some((proxy) => proxy.kind === 'warp' && proxy.isEnabled))
+const usageCounts = computed(() => {
+  const used = proxies.value.filter(proxyIsUsed).length
+  return { all: proxies.value.length, used, unused: proxies.value.length - used }
+})
+const filteredProxies = computed(() => proxies.value.filter((proxy) => {
+  if (usageFilter.value === 'used' && !proxyIsUsed(proxy)) return false
+  if (usageFilter.value === 'unused' && proxyIsUsed(proxy)) return false
+  if (categoryFilter.value === 'uncategorized' && proxy.category) return false
+  if (typeof categoryFilter.value === 'number' && proxy.category?.id !== categoryFilter.value) return false
+  return true
+}))
+const globalProxyGroups = computed(() => ([
+  { kind: 'manual' as const, label: '普通代理', items: proxies.value.filter((proxy) => proxy.kind === 'manual') },
+  { kind: 'resin' as const, label: 'Resin 动态代理', items: proxies.value.filter((proxy) => proxy.kind === 'resin') },
+  { kind: 'warp' as const, label: 'WARP', items: proxies.value.filter((proxy) => proxy.kind === 'warp') },
+]).filter((group) => group.items.length > 0))
+const globalSelectedProxy = computed(() => proxies.value.find(
+  (proxy) => proxy.id === globalProxyDialog.form.proxyId,
+) ?? null)
 const globalProxyLabel = computed(() => {
   if (globalProxyLoading.value && !globalProxy.value) return '读取中'
   if (globalProxyError.value) return '读取失败'
   if (!globalProxy.value?.enabled) return '未启用'
+  if (globalProxy.value.sourceMode === 'existing') {
+    return globalProxy.value.proxyName
+      || proxies.value.find((proxy) => proxy.id === globalProxy.value?.proxyId)?.name
+      || '已有代理'
+  }
   return protocolLabel(globalProxy.value.protocol)
 })
 const globalProxyHelp = computed(() => {
   if (globalProxyError.value) return globalProxyError.value
   if (!globalProxy.value?.enabled) return '尚未启用账号全局代理，点击进行配置'
+  if (globalProxy.value.sourceMode === 'existing') {
+    const selected = proxies.value.find((proxy) => proxy.id === globalProxy.value?.proxyId)
+    return selected
+      ? `${kindLabel(selected.kind)} · ${selected.name} · ${selected.host}:${selected.port}`
+      : globalProxy.value.proxyName
+        ? `${globalProxy.value.proxyKind ? kindLabel(globalProxy.value.proxyKind) : '已有代理'} · ${globalProxy.value.proxyName}`
+        : '当前引用的已有代理不可用，请重新选择'
+  }
   return `${protocolLabel(globalProxy.value.protocol)} · ${globalProxy.value.server}:${globalProxy.value.port}`
 })
 
@@ -805,11 +1137,33 @@ function egressIpText(proxy: OutboundProxy) {
     : '尚未检测'
 }
 
-function egressIpMeta(proxy: OutboundProxy) {
-  const location = [proxy.egressCountry, proxy.egressCity, proxy.egressIsp]
-    .filter(Boolean)
-    .join(' / ')
-  return [ipVersionLabel(proxy.egressIp), location].filter(Boolean).join(' · ')
+function proxyUsageCount(proxy: OutboundProxy) {
+  return proxy.usageCount ?? proxy.accountCount ?? 0
+}
+
+function proxyIsUsed(proxy: OutboundProxy) {
+  return proxy.isInUse ?? proxyUsageCount(proxy) > 0
+}
+
+function egressIpVersion(proxy: OutboundProxy) {
+  return ipVersionLabel(proxy.egressIp)
+}
+
+function egressRegionText(proxy: OutboundProxy) {
+  return [proxy.egressCountry, proxy.egressCity].filter(Boolean).join(' / ') || '未知'
+}
+
+function categoryTagStyle(category: ProxyCategory) {
+  if (!category.color) return undefined
+  return { borderColor: category.color, color: category.color }
+}
+
+function categoryProxyCount(category: ProxyCategory) {
+  return category.proxyCount ?? proxies.value.filter((proxy) => proxy.category?.id === category.id).length
+}
+
+function onProxySelectionChange(rows: OutboundProxy[]) {
+  selectedProxies.value = rows
 }
 
 function egressLocation(egress?: NetworkEgress | null) {
@@ -837,7 +1191,9 @@ function beforeImportDialogClose(done: DialogCloseDone) {
 }
 
 function beforeWarpDialogClose(done: DialogCloseDone) {
-  if (!warpDialog.creating) done()
+  if (warpDialog.creating) return
+  warpDialog.selectForGlobal = false
+  done()
 }
 
 async function loadProxies(showLoading = true) {
@@ -865,6 +1221,17 @@ async function loadPanelEgress() {
     }
   } finally {
     if (operationToken === panelEgressOperationToken) egressLoading.value = false
+  }
+}
+
+async function loadProxyCategories(showLoading = false) {
+  if (showLoading) categoryManagerDialog.loading = true
+  proxyCategoryLoading.value = true
+  try {
+    proxyCategories.value = await panelApi.proxyCategories()
+  } finally {
+    proxyCategoryLoading.value = false
+    if (showLoading) categoryManagerDialog.loading = false
   }
 }
 
@@ -902,7 +1269,7 @@ async function loadWarpStatus() {
 }
 
 async function refreshAll() {
-  await Promise.allSettled([loadProxies(), loadGlobalProxy(), loadWarpStatus()])
+  await Promise.allSettled([loadProxies(), loadProxyCategories(), loadGlobalProxy(), loadWarpStatus()])
 }
 
 async function refreshWarp(proxy: OutboundProxy) {
@@ -959,6 +1326,113 @@ async function refreshAllWarps() {
   }
 }
 
+function openBatchCategory() {
+  if (selectedProxies.value.length === 0 || batchCategoryDialog.saving) return
+  batchCategoryDialog.proxyIds = selectedProxies.value.map((proxy) => proxy.id)
+  batchCategoryDialog.categoryId = null
+  batchCategoryDialog.visible = true
+}
+
+async function saveBatchCategory() {
+  if (batchCategoryDialog.saving || batchCategoryDialog.proxyIds.length === 0) return
+  const proxyIds = [...batchCategoryDialog.proxyIds]
+  const categoryId = batchCategoryDialog.categoryId
+  batchCategoryDialog.saving = true
+  try {
+    const result = await panelApi.batchSetProxyCategory(proxyIds, categoryId)
+    ElMessage.success(result.message || `已更新 ${proxyIds.length} 个代理的分类`)
+    batchCategoryDialog.visible = false
+    batchCategoryDialog.proxyIds = []
+    await Promise.all([loadProxies(), loadProxyCategories()])
+    proxyTableRef.value?.clearSelection()
+    selectedProxies.value = []
+  } finally {
+    batchCategoryDialog.saving = false
+  }
+}
+
+async function openCategoryManager() {
+  categoryManagerDialog.visible = true
+  await loadProxyCategories(true)
+}
+
+function resetCategoryEditor() {
+  categoryEditorDialog.id = null
+  categoryEditorDialog.form = {
+    name: '',
+    color: '#409eff',
+    description: '',
+  }
+}
+
+function openCategoryEditor(category?: ProxyCategory) {
+  resetCategoryEditor()
+  if (category) {
+    categoryEditorDialog.id = category.id
+    categoryEditorDialog.form = {
+      name: category.name,
+      color: category.color || '#409eff',
+      description: category.description || '',
+    }
+  }
+  categoryEditorDialog.visible = true
+}
+
+async function saveCategory() {
+  if (categoryEditorDialog.saving) return
+  const name = categoryEditorDialog.form.name.trim()
+  if (!name) {
+    ElMessage.warning('请填写分类名称')
+    return
+  }
+  const duplicated = proxyCategories.value.some((category) => (
+    category.id !== categoryEditorDialog.id
+    && category.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase()
+  ))
+  if (duplicated) {
+    ElMessage.warning('已存在同名代理分类')
+    return
+  }
+
+  const payload = {
+    name,
+    color: normalizeOptional(categoryEditorDialog.form.color),
+    description: normalizeOptional(categoryEditorDialog.form.description),
+  }
+  categoryEditorDialog.saving = true
+  try {
+    if (categoryEditorDialog.id) {
+      await panelApi.updateProxyCategory(categoryEditorDialog.id, payload)
+      ElMessage.success('代理分类已更新')
+    } else {
+      await panelApi.createProxyCategory(payload)
+      ElMessage.success('代理分类已创建')
+    }
+    categoryEditorDialog.visible = false
+    resetCategoryEditor()
+    await loadProxyCategories()
+  } finally {
+    categoryEditorDialog.saving = false
+  }
+}
+
+async function removeCategory(category: ProxyCategory) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除代理分类“${category.name}”吗？分类标签会从代理移除，代理本身不会被删除。`,
+      '确认删除分类',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  const result = await panelApi.deleteProxyCategory(category.id)
+  ElMessage.success(result.message || '代理分类已删除')
+  if (categoryFilter.value === category.id) categoryFilter.value = 'all'
+  await Promise.allSettled([loadProxyCategories(), loadProxies()])
+}
+
 async function openGlobalProxyDialog() {
   if (globalProxyDialog.saving) return
   if (!await loadGlobalProxy()) {
@@ -966,11 +1440,18 @@ async function openGlobalProxyDialog() {
     return
   }
   const current = globalProxy.value
+  const sourceMode: GlobalProxySourceMode = current?.sourceMode === 'existing' || current?.proxyId
+    ? 'existing'
+    : current?.server
+      ? 'manual'
+      : 'existing'
   globalProxyDialog.hasPassword = Boolean(current?.hasPassword)
   globalProxyDialog.hasSecret = Boolean(current?.hasSecret)
   globalProxyDialog.form = current
     ? {
         enabled: current.enabled,
+        sourceMode,
+        proxyId: current.proxyId ?? null,
         protocol: current.protocol,
         server: current.server || '',
         port: current.port || 1080,
@@ -999,18 +1480,32 @@ async function saveGlobalProxy() {
   if (globalProxyDialog.saving) return
   const form = { ...globalProxyDialog.form }
   if (form.enabled) {
-    if (!form.server.trim() || form.port < 1 || form.port > 65535) {
-      ElMessage.warning('请填写有效的全局代理主机和端口')
-      return
-    }
-    if (form.protocol === 'mtproto' && !form.secret.trim() && !globalProxyDialog.hasSecret) {
-      ElMessage.warning('请填写 MTProxy Secret')
-      return
+    if (form.sourceMode === 'existing') {
+      const selected = proxies.value.find((proxy) => proxy.id === form.proxyId)
+      if (!selected) {
+        ElMessage.warning('请选择一个已有代理')
+        return
+      }
+      if (!selected.isEnabled) {
+        ElMessage.warning('所选代理已停用，请先启用或选择其他代理')
+        return
+      }
+    } else {
+      if (!form.server.trim() || form.port < 1 || form.port > 65535) {
+        ElMessage.warning('请填写有效的全局代理主机和端口')
+        return
+      }
+      if (form.protocol === 'mtproto' && !form.secret.trim() && !globalProxyDialog.hasSecret) {
+        ElMessage.warning('请填写 MTProxy Secret')
+        return
+      }
     }
   }
 
   const payload: SaveGlobalProxySettingsRequest = {
     ...form,
+    sourceMode: form.sourceMode,
+    proxyId: form.sourceMode === 'existing' ? form.proxyId : null,
     server: form.server.trim(),
     username: form.username.trim(),
     password: form.password.trim(),
@@ -1036,7 +1531,18 @@ function openCreate() {
   proxyDialog.hasPassword = false
   proxyDialog.hasSecret = false
   proxyDialog.hasResinAdminToken = false
+  proxyDialog.selectForGlobal = false
   proxyDialog.visible = true
+}
+
+function openProxyCreateForGlobal(kind: 'manual' | 'resin') {
+  openCreate()
+  proxyDialog.selectForGlobal = true
+  proxyDialog.form.kind = kind
+  if (kind === 'resin') {
+    proxyDialog.form.protocol = 'socks5'
+    proxyDialog.form.resinPlatform = 'telegram-panel'
+  }
 }
 
 function resetProxyDialog() {
@@ -1044,6 +1550,7 @@ function resetProxyDialog() {
   proxyDialog.hasPassword = false
   proxyDialog.hasSecret = false
   proxyDialog.hasResinAdminToken = false
+  proxyDialog.selectForGlobal = false
   proxyDialog.form = blankProxyForm()
 }
 
@@ -1074,6 +1581,7 @@ function openEdit(proxy: OutboundProxy) {
     resinAdminUrl: proxy.resinAdminUrl || '',
     resinAdminToken: '',
     clearResinAdminToken: false,
+    categoryId: proxy.category?.id ?? null,
     isEnabled: proxy.isEnabled,
     testAfterSave: false,
   }
@@ -1107,6 +1615,7 @@ async function saveProxy() {
   if (proxyDialog.saving) return
   const form = { ...proxyDialog.form }
   const editingId = proxyDialog.id
+  const selectForGlobal = proxyDialog.selectForGlobal
   if (!form.name.trim() || !form.host.trim() || !form.port) {
     ElMessage.warning('请填写名称、主机和端口')
     return
@@ -1150,6 +1659,10 @@ async function saveProxy() {
     }
     proxyDialog.visible = false
     resetProxyDialog()
+    if (selectForGlobal) {
+      globalProxyDialog.form.sourceMode = 'existing'
+      globalProxyDialog.form.proxyId = saved.id
+    }
   } finally {
     await Promise.allSettled([loadProxies()])
     if (operationToken === proxySaveOperationToken) proxyDialog.saving = false
@@ -1161,7 +1674,11 @@ async function testProxy(proxy: OutboundProxy) {
   try {
     const result = await panelApi.testProxy(proxy.id)
     const passed = ['success', 'ok', 'passed'].includes(result.testStatus.toLowerCase())
-    if (passed) ElMessage.success(`出口 ${result.egressIp || '检测成功'} · ${result.lastLatencyMs ?? '-'} ms`)
+    if (passed) {
+      const location = egressRegionText(result)
+      const isp = result.egressIsp || '未知'
+      ElMessage.success(`出口 ${result.egressIp || '检测成功'} · ${location} · ISP ${isp} · ${result.lastLatencyMs ?? '-'} ms`)
+    }
     else ElMessage.error(result.lastError || '代理检测失败')
     await loadProxies()
   } finally {
@@ -1215,6 +1732,14 @@ async function importProxyText() {
 }
 
 function openWarpCreate() {
+  openWarpCreateInternal(false)
+}
+
+function openWarpCreateForGlobal() {
+  openWarpCreateInternal(true)
+}
+
+function openWarpCreateInternal(selectForGlobal = false) {
   if (warpDialog.creating) return
   if (warpUnavailable.value) {
     ElMessage.warning(warpStatusError.value || warpStatus.value?.error || '当前环境无法创建 WARP')
@@ -1223,10 +1748,17 @@ function openWarpCreate() {
   warpCreateOperationToken += 1
   warpDialog.name = ''
   warpDialog.protocol = warpStatus.value?.defaultProtocol === 'socks5' ? 'socks5' : 'http'
+  warpDialog.selectForGlobal = selectForGlobal
   warpDialog.requestId = typeof crypto.randomUUID === 'function'
     ? crypto.randomUUID()
     : `warp-${Date.now()}-${Math.random().toString(36).slice(2)}`
   warpDialog.visible = true
+}
+
+function closeWarpDialog() {
+  if (warpDialog.creating) return
+  warpDialog.selectForGlobal = false
+  warpDialog.visible = false
 }
 
 async function createWarp() {
@@ -1234,6 +1766,7 @@ async function createWarp() {
   const operationToken = ++warpCreateOperationToken
   const name = normalizeOptional(warpDialog.name)
   const requestId = warpDialog.requestId
+  const selectForGlobal = warpDialog.selectForGlobal
   warpDialog.creating = true
   try {
     const created = await panelApi.createWarpProxies({
@@ -1245,6 +1778,11 @@ async function createWarp() {
     ElMessage.success(`WARP 代理“${created.name}”已创建（${protocolLabel(created.protocol)}）`)
     warpDialog.visible = false
     warpDialog.requestId = ''
+    warpDialog.selectForGlobal = false
+    if (selectForGlobal) {
+      globalProxyDialog.form.sourceMode = 'existing'
+      globalProxyDialog.form.proxyId = created.id
+    }
   } finally {
     await Promise.allSettled([loadProxies(), loadWarpStatus()])
     if (operationToken === warpCreateOperationToken) warpDialog.creating = false
@@ -1252,7 +1790,7 @@ async function createWarp() {
 }
 
 onMounted(() => {
-  void Promise.allSettled([loadProxies(), loadPanelEgress(), loadGlobalProxy(), loadWarpStatus()])
+  void Promise.allSettled([loadProxies(), loadProxyCategories(), loadPanelEgress(), loadGlobalProxy(), loadWarpStatus()])
   autoStatusRefreshTimer = setInterval(() => {
     if (document.visibilityState !== 'visible'
       || refreshingAllWarps.value
@@ -1373,6 +1911,86 @@ onBeforeUnmount(() => {
   margin-top: 4px;
 }
 
+.selected-proxy-summary {
+  display: grid;
+  gap: 5px;
+  margin: -2px 0 14px;
+  padding: 12px;
+  border: 1px solid var(--tp-border);
+  border-radius: 4px;
+  background: var(--tp-panel-2);
+}
+
+.selected-proxy-heading,
+.global-proxy-actions,
+.proxy-list-header,
+.proxy-list-actions,
+.egress-detail {
+  display: flex;
+  align-items: center;
+}
+
+.selected-proxy-heading,
+.global-proxy-actions,
+.proxy-list-actions {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.global-proxy-actions {
+  margin-top: 4px;
+}
+
+.proxy-list-header {
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.usage-tabs {
+  flex: 1;
+  min-width: 260px;
+}
+
+.usage-tabs :deep(.el-tabs__header) {
+  margin: 0;
+}
+
+.usage-tabs :deep(.el-tabs__content) {
+  display: none;
+}
+
+.usage-tab-label {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.usage-tab-label strong {
+  color: var(--tp-muted);
+  font-size: 12px;
+}
+
+.category-filter {
+  width: 160px;
+}
+
+.egress-detail {
+  align-items: flex-start;
+  gap: 6px;
+  min-height: 20px;
+}
+
+.egress-field-label {
+  flex: 0 0 30px;
+  color: var(--tp-muted);
+  font-size: 12px;
+}
+
+.category-manager-toolbar {
+  margin-bottom: 12px;
+}
+
 .form-hint {
   width: 100%;
   margin-top: 6px;
@@ -1446,6 +2064,22 @@ onBeforeUnmount(() => {
   .warp-runtime {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .proxy-list-header,
+  .proxy-list-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .usage-tabs,
+  .category-filter,
+  .proxy-list-actions .el-button {
+    width: 100%;
+  }
+
+  .proxy-list-actions .el-button {
+    margin-left: 0;
   }
 
   .maintenance-state,

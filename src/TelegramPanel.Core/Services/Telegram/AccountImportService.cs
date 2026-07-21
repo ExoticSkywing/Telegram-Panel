@@ -892,7 +892,8 @@ public class AccountImportService
             var operation = await _proxyManagement.BindAccountsAsync(
                 new[] { account.Id },
                 effectiveBinding,
-                cancellationToken);
+                cancellationToken,
+                expectedConnection: prepared.Connection);
             var item = operation.Items.FirstOrDefault(x => x.AccountId == account.Id);
             if (item?.Success != true)
             {
@@ -1016,15 +1017,64 @@ public class AccountImportService
             return default;
         if (strategy == "global")
         {
-            var globalProxy = GlobalTelegramProxyConfiguration.BuildRequired(_configuration);
-            return new PreparedImportProxy(
-                globalProxy,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null);
+            var stableImportKey = BuildImportStableKey(stableKeySeed, operationNonce);
+            var selectedGlobalId = _proxyManagement.GetEnabledGlobalProxyId();
+            var selectedGlobal = selectedGlobalId is > 0
+                ? await _proxyManagement.GetAsync(
+                    selectedGlobalId.Value,
+                    cancellationToken: cancellationToken)
+                : null;
+            if (selectedGlobalId is > 0 && selectedGlobal is not { IsEnabled: true })
+                throw new InvalidOperationException("全局代理引用的已有代理不存在或已停用");
+            if (selectedGlobal?.Kind == OutboundProxyKinds.Warp
+                && _temporaryWarpClaims.OwnsRequest(selectedGlobal.WarpProfile?.RequestId))
+            {
+                throw new InvalidOperationException(
+                    "全局 WARP 正被另一个账号首次连接流程使用，请稍后重试");
+            }
+
+            IDisposable? warpUsageClaim = null;
+            try
+            {
+                if (selectedGlobal?.Kind == OutboundProxyKinds.Warp
+                    && _warpProxyUsageGuard != null)
+                {
+                    warpUsageClaim = _warpProxyUsageGuard.TryAcquireUsage(selectedGlobal.Id)
+                        ?? throw new InvalidOperationException(
+                            "全局 WARP 正在维护或被另一个首次连接流程使用，请稍后重试；账号尚未发起首次连接");
+                }
+
+                // 已有代理直接使用同一次数据库快照构造连接，确保 Resin 控制面
+                // 快照、WARP 租约与首连实际使用的代理完全一致。
+                var globalProxy = selectedGlobal == null
+                    ? await _proxyManagement.ResolveGlobalProxyRequiredAsync(
+                        stableImportKey,
+                        cancellationToken,
+                        _configuration)
+                    : AccountProxyResolver.BuildConnectionOptions(
+                        selectedGlobal,
+                        stableImportKey);
+                var resinLease = selectedGlobal?.Kind == OutboundProxyKinds.Resin
+                    ? new ResinLeaseControlSnapshot(
+                        selectedGlobal.Id,
+                        selectedGlobal.ResinAdminUrl,
+                        selectedGlobal.ResinAdminToken,
+                        selectedGlobal.ResinPlatform)
+                    : null;
+                return new PreparedImportProxy(
+                    globalProxy,
+                    null,
+                    resinLease,
+                    resinLease == null ? null : stableImportKey,
+                    stableImportKey,
+                    warpUsageClaim,
+                    null);
+            }
+            catch
+            {
+                warpUsageClaim?.Dispose();
+                throw;
+            }
         }
 
         if (strategy == "existing")
@@ -1178,7 +1228,9 @@ public class AccountImportService
         ProxyConnectionOptions? current;
         if (strategy == "global")
         {
-            current = GlobalTelegramProxyConfiguration.Build(_configuration);
+            current = await _proxyManagement.ResolveGlobalProxyAsync(
+                prepared.StableIdentityKey ?? "tg_import_validation",
+                cancellationToken);
         }
         else if (strategy is "existing" or "warp_per_account")
         {

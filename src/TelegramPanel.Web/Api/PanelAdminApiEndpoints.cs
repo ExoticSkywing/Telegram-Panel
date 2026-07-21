@@ -135,8 +135,8 @@ public static class PanelAdminApiEndpoints
         secured.MapPost("/version-info/apply", ApplyVersionUpdateAsync);
         secured.MapPost("/system/restart", RestartSystemAsync);
         secured.MapPost("/settings/telegram-api", SaveTelegramApiSettingsAsync);
-        secured.MapGet("/settings/global-proxy", GetGlobalProxySettings);
-        secured.MapPost("/settings/global-proxy", SaveGlobalProxySettingsAsync);
+        secured.MapGet("/settings/global-proxy", GetGlobalProxySettingsAsync);
+        secured.MapPost("/settings/global-proxy", SaveGlobalProxySettingsEndpointAsync);
         secured.MapPost("/settings/cloud-mail", SaveCloudMailSettingsAsync);
         secured.MapPost("/settings/cloud-mail/token", GenerateCloudMailTokenAsync);
         secured.MapPost("/settings/ai", SaveAiSettingsAsync);
@@ -2285,11 +2285,6 @@ public static class PanelAdminApiEndpoints
         var configuredProtocol = (configuration["Telegram:Proxy:Protocol"] ?? string.Empty)
             .Trim()
             .ToLowerInvariant();
-        bool? configuredEnabled = bool.TryParse(
-            configuration["Telegram:Proxy:Enabled"],
-            out var enabled)
-            ? enabled
-            : null;
         var protocol = OutboundProxyProtocols.IsSupported(configuredProtocol)
             ? configuredProtocol
             : string.IsNullOrWhiteSpace(secret)
@@ -2297,8 +2292,9 @@ public static class PanelAdminApiEndpoints
                 : OutboundProxyProtocols.MtProto;
 
         return new GlobalProxySettingsDto(
-            Enabled: configuredEnabled
-                     ?? (!string.IsNullOrWhiteSpace(server) || !string.IsNullOrWhiteSpace(portText)),
+            // 统一使用配置解析器判断启用状态。已有代理模式没有 Server/Port，
+            // 不能再按旧手动地址推断，否则后台显示会与运行时路由不一致。
+            Enabled: GlobalTelegramProxyConfiguration.IsEnabled(configuration),
             Protocol: protocol,
             Server: server,
             Port: int.TryParse(portText, out var port) ? port : 0,
@@ -2306,18 +2302,55 @@ public static class PanelAdminApiEndpoints
             HasPassword: protocol != OutboundProxyProtocols.MtProto
                          && !string.IsNullOrWhiteSpace(configuration["Telegram:Proxy:Password"]),
             HasSecret: protocol == OutboundProxyProtocols.MtProto
-                       && !string.IsNullOrWhiteSpace(secret));
+                       && !string.IsNullOrWhiteSpace(secret),
+            SourceMode: GlobalTelegramProxyConfiguration.GetSourceMode(configuration),
+            ProxyId: GlobalTelegramProxyConfiguration.GetSelectedProxyId(
+                configuration,
+                requireEnabled: false));
     }
 
-    private static IResult GetGlobalProxySettings(IConfiguration configuration) =>
-        Results.Ok(ReadGlobalProxySettings(configuration));
+    private static async Task<IResult> GetGlobalProxySettingsAsync(
+        IConfiguration configuration,
+        ProxyManagementService proxyManagement,
+        CancellationToken cancellationToken)
+    {
+        var settings = ReadGlobalProxySettings(configuration);
+        if (settings.SourceMode != GlobalTelegramProxyConfiguration.ExistingSourceMode
+            || settings.ProxyId is not > 0)
+            return Results.Ok(settings);
+
+        var proxy = await proxyManagement.GetAsync(
+            settings.ProxyId.Value,
+            cancellationToken: cancellationToken);
+        return Results.Ok(settings with
+        {
+            ProxyName = proxy?.Name,
+            ProxyKind = proxy?.Kind
+        });
+    }
+
+    private static Task<IResult> SaveGlobalProxySettingsEndpointAsync(
+        SaveGlobalProxySettingsRequestDto request,
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        ITelegramClientPool telegramClientPool,
+        ProxyManagementService proxyManagement,
+        CancellationToken cancellationToken) =>
+        SaveGlobalProxySettingsAsync(
+            request,
+            configuration,
+            environment,
+            telegramClientPool,
+            cancellationToken,
+            proxyManagement);
 
     internal static async Task<IResult> SaveGlobalProxySettingsAsync(
         SaveGlobalProxySettingsRequestDto request,
         IConfiguration configuration,
         IWebHostEnvironment environment,
         ITelegramClientPool telegramClientPool,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ProxyManagementService? proxyManagement = null)
     {
         var root = await LoadLocalConfigRootAsync(LocalConfigFile.ResolvePath(configuration, environment));
         var telegram = EnsureObject(root, "Telegram");
@@ -2326,11 +2359,62 @@ public static class PanelAdminApiEndpoints
         {
             var disabledProxy = EnsureObject(telegram, "Proxy");
             disabledProxy["Enabled"] = false;
-            await SaveLocalRootAsync(configuration, environment, root, cancellationToken);
-            ReloadConfiguration(configuration);
-            await telegramClientPool.RemoveAllClientsAsync();
+            await PersistGlobalProxyChangeAsync(
+                proxyManagement,
+                nextEnabled: false,
+                nextSourceMode: GlobalTelegramProxyConfiguration.GetSourceMode(configuration),
+                nextProxyId: GlobalTelegramProxyConfiguration.GetSelectedProxyId(
+                    configuration,
+                    requireEnabled: false),
+                configuration,
+                environment,
+                root,
+                telegramClientPool,
+                cancellationToken);
             return Results.Ok(new OperationResultDto(true, "全局代理已关闭，Telegram 客户端缓存已清理"));
         }
+
+        var sourceMode = (request.SourceMode ?? GlobalTelegramProxyConfiguration.ManualSourceMode)
+            .Trim()
+            .ToLowerInvariant();
+        if (sourceMode == GlobalTelegramProxyConfiguration.ExistingSourceMode)
+        {
+            if (request.ProxyId is not > 0)
+                return Results.BadRequest(new OperationResultDto(false, "请选择已有代理"));
+            if (proxyManagement == null)
+                return Results.BadRequest(new OperationResultDto(false, "无法解析已有代理，请刷新后重试"));
+
+            var selected = await proxyManagement.GetAsync(
+                request.ProxyId.Value,
+                cancellationToken: cancellationToken);
+            if (selected is not { IsEnabled: true })
+                return Results.BadRequest(new OperationResultDto(false, "所选代理不存在或已停用"));
+
+            var selectedProxy = EnsureObject(telegram, "Proxy");
+            selectedProxy["Enabled"] = true;
+            selectedProxy["SourceMode"] = GlobalTelegramProxyConfiguration.ExistingSourceMode;
+            selectedProxy["ProxyId"] = selected.Id;
+            // 引用已有代理时不写入 Server/Password/Secret，运行时始终从数据库读取。
+            selectedProxy.Remove("Server");
+            selectedProxy.Remove("Port");
+            selectedProxy.Remove("Protocol");
+            selectedProxy.Remove("Username");
+            selectedProxy.Remove("Password");
+            selectedProxy.Remove("Secret");
+            await PersistGlobalProxyChangeAsync(
+                proxyManagement,
+                nextEnabled: true,
+                nextSourceMode: GlobalTelegramProxyConfiguration.ExistingSourceMode,
+                nextProxyId: selected.Id,
+                configuration,
+                environment,
+                root,
+                telegramClientPool,
+                cancellationToken);
+            return Results.Ok(new OperationResultDto(true, "全局代理已切换为已有代理，Telegram 客户端缓存已清理"));
+        }
+        if (sourceMode != GlobalTelegramProxyConfiguration.ManualSourceMode)
+            return Results.BadRequest(new OperationResultDto(false, "全局代理来源仅支持 manual 或 existing"));
 
         var protocol = (request.Protocol ?? string.Empty).Trim().ToLowerInvariant();
         if (!OutboundProxyProtocols.IsSupported(protocol))
@@ -2372,6 +2456,8 @@ public static class PanelAdminApiEndpoints
 
         var proxy = EnsureObject(telegram, "Proxy");
         proxy["Enabled"] = true;
+        proxy["SourceMode"] = GlobalTelegramProxyConfiguration.ManualSourceMode;
+        proxy.Remove("ProxyId");
         proxy["Protocol"] = protocol;
         proxy["Server"] = server;
         proxy["Port"] = request.Port;
@@ -2405,10 +2491,58 @@ public static class PanelAdminApiEndpoints
             proxy.Remove("Secret");
         }
 
-        await SaveLocalRootAsync(configuration, environment, root, cancellationToken);
-        ReloadConfiguration(configuration);
-        await telegramClientPool.RemoveAllClientsAsync();
+        await PersistGlobalProxyChangeAsync(
+            proxyManagement,
+            nextEnabled: true,
+            nextSourceMode: GlobalTelegramProxyConfiguration.ManualSourceMode,
+            nextProxyId: null,
+            configuration,
+            environment,
+            root,
+            telegramClientPool,
+            cancellationToken);
         return Results.Ok(new OperationResultDto(true, "全局代理配置已保存，Telegram 客户端缓存已清理"));
+    }
+
+    private static async Task PersistGlobalProxyChangeAsync(
+        ProxyManagementService? proxyManagement,
+        bool nextEnabled,
+        string nextSourceMode,
+        int? nextProxyId,
+        IConfiguration configuration,
+        IWebHostEnvironment environment,
+        JsonObject root,
+        ITelegramClientPool telegramClientPool,
+        CancellationToken cancellationToken)
+    {
+        async Task ApplyAsync(CancellationToken applyCancellationToken)
+        {
+            await SaveLocalRootAsync(
+                configuration,
+                environment,
+                root,
+                applyCancellationToken);
+            ReloadConfiguration(configuration);
+            // 配置生效后再严格清空客户端池。清理会提升连接代际，既能淘汰
+            // 保存前的旧客户端，也能拒绝保存窗口中按旧配置创建的客户端写回。
+            await telegramClientPool.RemoveAllClientsAsync();
+        }
+
+        if (proxyManagement != null)
+        {
+            await proxyManagement.ExecuteGlobalProxyChangeAsync(
+                nextEnabled,
+                nextSourceMode,
+                nextProxyId,
+                ApplyAsync,
+                cancellationToken);
+            return;
+        }
+        else
+        {
+            // 仅保留给没有注册代理管理服务的轻量测试/兼容调用方。
+            await ApplyAsync(cancellationToken);
+        }
     }
 
     private static void ReloadConfiguration(IConfiguration configuration)
@@ -6023,12 +6157,12 @@ public static class PanelAdminApiEndpoints
     private static bool IsWebhookEnabled(IConfiguration configuration) =>
         string.Equals(configuration["Telegram:WebhookEnabled"]?.Trim(), "true", StringComparison.OrdinalIgnoreCase);
 
-    private static AccountProxyBindingInput? ParseImportProxyBinding(
+    internal static AccountProxyBindingInput? ParseImportProxyBinding(
         string? strategy,
         string? proxyId)
     {
         if (string.IsNullOrWhiteSpace(strategy))
-            return new AccountProxyBindingInput("global");
+            return null;
 
         var parsedProxyId = ParseNullableInt(proxyId);
         return new AccountProxyBindingInput(strategy.Trim(), parsedProxyId);
@@ -7530,7 +7664,11 @@ public sealed record GlobalProxySettingsDto(
     int Port,
     string? Username,
     bool HasPassword,
-    bool HasSecret);
+    bool HasSecret,
+    string SourceMode = GlobalTelegramProxyConfiguration.ManualSourceMode,
+    int? ProxyId = null,
+    string? ProxyName = null,
+    string? ProxyKind = null);
 public sealed record SaveGlobalProxySettingsRequestDto(
     bool Enabled,
     string? Protocol,
@@ -7539,7 +7677,9 @@ public sealed record SaveGlobalProxySettingsRequestDto(
     string? Username,
     string? Password,
     string? Secret,
-    bool ClearPassword = false);
+    bool ClearPassword = false,
+    string? SourceMode = null,
+    int? ProxyId = null);
 public sealed record CloudMailSettingsDto(string BaseUrl, string Domain, string Token);
 public sealed record GenerateCloudMailTokenRequestDto(string? BaseUrl, string? AdminEmail, string? AdminPassword);
 public sealed record CloudMailTokenResultDto(string Token);

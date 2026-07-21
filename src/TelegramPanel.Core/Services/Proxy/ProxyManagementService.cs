@@ -60,11 +60,32 @@ public sealed partial class ProxyManagementService
 
     public async Task<IReadOnlyList<OutboundProxy>> ListAsync(
         CancellationToken cancellationToken = default)
+        => await ListAsync(null, null, cancellationToken);
+
+    public async Task<IReadOnlyList<OutboundProxy>> ListAsync(
+        string? usage,
+        int? categoryId,
+        CancellationToken cancellationToken = default)
     {
-        return await _db.OutboundProxies
+        var normalizedUsage = (usage ?? "all").Trim().ToLowerInvariant();
+        if (normalizedUsage is not ("all" or "used" or "unused"))
+            throw new ArgumentException("代理使用状态仅支持 all、used 或 unused");
+
+        var globalProxyId = GetEnabledGlobalProxyId();
+        var query = _db.OutboundProxies
             .AsNoTracking()
             .Include(x => x.Accounts)
+            .Include(x => x.Category)
             .Include(x => x.WarpProfile)
+            .AsQueryable();
+        if (categoryId is > 0)
+            query = query.Where(x => x.CategoryId == categoryId);
+        if (normalizedUsage == "used")
+            query = query.Where(x => x.Accounts.Any() || x.Id == globalProxyId);
+        else if (normalizedUsage == "unused")
+            query = query.Where(x => !x.Accounts.Any() && x.Id != globalProxyId);
+
+        return await query
             .OrderByDescending(x => x.Id)
             .ToListAsync(cancellationToken);
     }
@@ -74,7 +95,7 @@ public sealed partial class ProxyManagementService
         bool includeAccounts = false,
         CancellationToken cancellationToken = default)
     {
-        IQueryable<OutboundProxy> query = _db.OutboundProxies;
+        IQueryable<OutboundProxy> query = _db.OutboundProxies.Include(x => x.Category);
         if (includeAccounts)
             query = query.Include(x => x.Accounts);
         return await query
@@ -95,8 +116,10 @@ public sealed partial class ProxyManagementService
         {
             await EnsureNoDuplicateAsync(normalized, exceptId: null, cancellationToken);
             var now = DateTime.UtcNow;
+            await EnsureCategoryExistsAsync(normalized.CategoryId, cancellationToken);
             var proxy = new OutboundProxy
             {
+                CategoryId = normalized.CategoryId,
                 Name = normalized.Name!,
                 Kind = normalized.Kind!,
                 Protocol = normalized.Protocol!,
@@ -141,6 +164,23 @@ public sealed partial class ProxyManagementService
             var boundAccounts = await _db.Accounts
                 .Where(x => x.ProxyId == proxy.Id)
                 .ToListAsync(cancellationToken);
+            var isGlobalProxy = IsEnabledGlobalProxy(proxy.Id);
+            if (isGlobalProxy)
+            {
+                var globalAccounts = await _db.Accounts
+                    .Where(x => x.ProxyId == null && x.UseGlobalProxy)
+                    .ToListAsync(cancellationToken);
+                boundAccounts = boundAccounts
+                    .Concat(globalAccounts)
+                    .DistinctBy(x => x.Id)
+                    .ToList();
+            }
+
+            if (isGlobalProxy && !input.IsEnabled)
+                throw new ProxyInUseException("该代理正在作为账号全局代理使用，请先切换或关闭全局代理");
+
+            var categoryId = NormalizeCategoryId(input.CategoryId);
+            await EnsureCategoryExistsAsync(categoryId, cancellationToken);
 
             if (proxy.Kind == OutboundProxyKinds.Warp)
             {
@@ -167,6 +207,7 @@ public sealed partial class ProxyManagementService
 
                 var now = DateTime.UtcNow;
                 proxy.Name = NormalizeName(input.Name, proxy.Name);
+                proxy.CategoryId = categoryId;
                 proxy.IsEnabled = input.IsEnabled;
                 warpProfile.DesiredEnabled = input.IsEnabled;
                 if (lifecycleChangeRequired)
@@ -243,6 +284,7 @@ public sealed partial class ProxyManagementService
             }
 
             proxy.Name = normalized.Name!;
+            proxy.CategoryId = normalized.CategoryId;
             proxy.Kind = normalized.Kind!;
             proxy.Protocol = normalized.Protocol!;
             proxy.Host = normalized.Host!;
@@ -261,6 +303,9 @@ public sealed partial class ProxyManagementService
                 RestoreBoundAccountActivation(boundAccounts, activationStates!);
             proxy.UpdatedAtUtc = DateTime.UtcNow;
             await _db.SaveChangesAsync(cancellationToken);
+
+            if (isGlobalProxy && connectionChanged)
+                await _clientPool.RemoveAllClientsAsync();
 
             return normalized.TestAfterSave
                 ? await TestAsyncCore(proxy, cancellationToken)
@@ -285,6 +330,8 @@ public sealed partial class ProxyManagementService
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new KeyNotFoundException("代理不存在");
 
+            if (IsEnabledGlobalProxy(proxy.Id))
+                throw new ProxyInUseException("该代理正在作为账号全局代理使用，请先切换或关闭全局代理");
             if (proxy.Accounts.Count > 0)
                 throw new ProxyInUseException($"代理仍被 {proxy.Accounts.Count} 个账号使用，请先切换账号代理");
 
@@ -305,8 +352,10 @@ public sealed partial class ProxyManagementService
         {
             var proxy = await _db.OutboundProxies
                 .Include(x => x.WarpProfile)
+                .Include(x => x.Category)
                 .FirstOrDefaultAsync(x => x.Id == id, cancellationToken)
                 ?? throw new KeyNotFoundException("代理不存在");
+
             return await TestAsyncCore(proxy, cancellationToken);
         }
         finally
@@ -334,7 +383,9 @@ public sealed partial class ProxyManagementService
             if (!account.UseGlobalProxy)
                 return await _probeService.ProbePanelAsync(cancellationToken);
 
-            var globalProxy = RequireGlobalProxy();
+            var globalProxy = await ResolveGlobalProxyRequiredAsync(
+                $"tg_account_{account.Id}",
+                cancellationToken);
             return await _probeService.ProbeProxyAsync(
                 globalProxy,
                 requireWarp: false,
@@ -349,16 +400,30 @@ public sealed partial class ProxyManagementService
             cancellationToken);
     }
 
-    private ProxyConnectionOptions RequireGlobalProxy()
+    public async Task<ProxyConnectionOptions?> ResolveGlobalProxyAsync(
+        string stableAccountKey,
+        CancellationToken cancellationToken = default,
+        IConfiguration? configurationOverride = null)
     {
-        if (_configuration == null)
+        var configuration = _configuration ?? configurationOverride;
+        if (configuration == null)
         {
             throw new InvalidOperationException(
                 "Telegram 全局代理配置不可用，已阻止降级为直连");
         }
 
-        return GlobalTelegramProxyConfiguration.BuildRequired(_configuration);
+        return await new GlobalProxyResolver(_db, configuration).ResolveAsync(
+            stableAccountKey,
+            cancellationToken);
     }
+
+    public async Task<ProxyConnectionOptions> ResolveGlobalProxyRequiredAsync(
+        string stableAccountKey,
+        CancellationToken cancellationToken = default,
+        IConfiguration? configurationOverride = null) =>
+        await ResolveGlobalProxyAsync(stableAccountKey, cancellationToken, configurationOverride)
+        ?? throw new InvalidOperationException(
+            "Telegram 全局代理尚未配置，已阻止降级为直连");
 
     public Task<OutboundProxy> CreateWarpAsync(
         string? name,

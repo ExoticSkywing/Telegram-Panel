@@ -110,7 +110,8 @@ public sealed partial class ProxyManagementService
             Secret = secret,
             ResinPlatform = resinPlatform,
             ResinAdminUrl = adminUrl,
-            ResinAdminToken = resinAdminToken
+            ResinAdminToken = resinAdminToken,
+            CategoryId = NormalizeCategoryId(input.CategoryId)
         };
     }
 

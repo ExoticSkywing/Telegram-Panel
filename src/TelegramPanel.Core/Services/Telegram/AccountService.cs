@@ -634,7 +634,8 @@ public class AccountService : IAccountService
         ArgumentNullException.ThrowIfNull(proxyOverride);
         var accountProxy = proxyOverride.Proxy
                            ?? (proxyOverride.UseGlobalProxy
-                               ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                               ? throw new InvalidOperationException(
+                                   "全局代理路由未在首次连接前解析，已阻止降级为直连")
                                : null);
 
         string Config(string what)

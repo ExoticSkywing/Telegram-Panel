@@ -150,7 +150,8 @@ public class TelegramClientPool : ITelegramClientPool, IDisposable
                                   ?? await _proxyResolver.ResolveAsync(accountId);
             var accountProxy = proxyResolution.Proxy
                                ?? (proxyResolution.UseGlobalProxy
-                                   ? GlobalTelegramProxyConfiguration.BuildRequired(_configuration)
+                                   ? throw new InvalidOperationException(
+                                       "全局代理路由未在客户端创建前解析，已阻止降级为直连；旧出口客户端不会被复用")
                                    : null);
 
             // 使用 config 回调设置 session 路径

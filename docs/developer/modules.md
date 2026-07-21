@@ -47,6 +47,10 @@
 - 账号选择继承的 Telegram 全局代理
 - 账号明确选择的直连
 
+导入或登录选择“已有代理”后，宿主会把该 `ProxyId` 长期保存到账号；选择“全局代理”
+则保存继承标记并跟随以后对全局出口的修改。模块只消费账号当前路由，不需要区分代理是
+普通代理、Resin、WARP 或全局引用，也不应在模块配置中再保存一份代理快照。
+
 优先复用 `AccountTelegramToolsService`、`ChannelService`、`GroupService` 等宿主服务。
 以任务执行器收到的 `IModuleTaskExecutionHost host` 为例：
 

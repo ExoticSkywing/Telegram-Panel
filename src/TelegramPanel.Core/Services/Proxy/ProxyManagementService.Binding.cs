@@ -15,6 +15,121 @@ public sealed partial class ProxyManagementService
     }
 
     /// <summary>
+    /// 在修改全局代理配置前，回收旧全局 Resin 为账号分配的稳定 Lease。
+    ///
+    /// 配置文件写入由调用方通过回调完成；整个过程持有代理变更锁，避免
+    /// 账号切换在“旧 Lease 已释放、新全局配置尚未落盘”的窗口中重新建立连接。
+    /// 如果清理或配置写入失败，受影响账号保持停用状态，调用方可在修复后重试。
+    /// </summary>
+    public async Task ExecuteGlobalProxyChangeAsync(
+        bool nextEnabled,
+        string? nextSourceMode,
+        int? nextProxyId,
+        Func<CancellationToken, Task> applyChangeAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(applyChangeAsync);
+
+        var normalizedSourceMode = (nextSourceMode ?? GlobalTelegramProxyConfiguration.ManualSourceMode)
+            .Trim()
+            .ToLowerInvariant();
+        if (normalizedSourceMode is not (
+                GlobalTelegramProxyConfiguration.ManualSourceMode
+                or GlobalTelegramProxyConfiguration.ExistingSourceMode))
+        {
+            throw new ArgumentException("全局代理来源仅支持 manual 或 existing", nameof(nextSourceMode));
+        }
+        if (nextEnabled
+            && normalizedSourceMode == GlobalTelegramProxyConfiguration.ExistingSourceMode
+            && nextProxyId is not > 0)
+        {
+            throw new ArgumentException("启用已有全局代理时必须提供代理 ID", nameof(nextProxyId));
+        }
+
+        await using var mutationLease = await AcquireMutationLeaseAsync(cancellationToken);
+        if (nextEnabled
+            && normalizedSourceMode == GlobalTelegramProxyConfiguration.ExistingSourceMode)
+        {
+            var selectedProxyAvailable = await _db.OutboundProxies
+                .AsNoTracking()
+                .AnyAsync(
+                    x => x.Id == nextProxyId!.Value && x.IsEnabled,
+                    cancellationToken);
+            if (!selectedProxyAvailable)
+            {
+                throw new KeyNotFoundException(
+                    "所选全局代理不存在或已停用，未修改全局代理配置");
+            }
+        }
+
+        var previousGlobalResin = await ResolveConfiguredGlobalResinProxyAsync(cancellationToken);
+        var keepsSameResinRoute = nextEnabled
+            && normalizedSourceMode == GlobalTelegramProxyConfiguration.ExistingSourceMode
+            && previousGlobalResin != null
+            && nextProxyId == previousGlobalResin.Id;
+
+        var affectedAccounts = previousGlobalResin != null && !keepsSameResinRoute
+            ? await _db.Accounts
+                .Where(x => x.ProxyId == null && x.UseGlobalProxy)
+                .ToListAsync(cancellationToken)
+            : new List<Account>();
+        var activationStates = affectedAccounts.ToDictionary(
+            x => x.Id,
+            x => x.IsActive);
+
+        if (affectedAccounts.Count > 0)
+        {
+            foreach (var account in affectedAccounts)
+                account.IsActive = false;
+            if (activationStates.Values.Any(x => x))
+                await _db.SaveChangesAsync(cancellationToken);
+
+            await ReleaseClientsStrictAsync(affectedAccounts.Select(x => x.Id));
+            foreach (var account in affectedAccounts)
+                await ReleaseResinLeaseAsync(
+                    previousGlobalResin!,
+                    account.Id,
+                    cancellationToken);
+        }
+
+        // 只有旧 Lease 全部释放后才允许写入新配置。异常时保持失败闭锁，
+        // 防止账号在旧出口身份未清理的情况下继续运行。
+        await applyChangeAsync(cancellationToken);
+
+        if (affectedAccounts.Count == 0)
+            return;
+
+        foreach (var account in affectedAccounts)
+            account.IsActive = activationStates[account.Id];
+        await _db.SaveChangesAsync(cancellationToken);
+    }
+
+    private async Task<OutboundProxy?> ResolveConfiguredGlobalResinProxyAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_configuration == null
+            || GlobalTelegramProxyConfiguration.GetSourceMode(_configuration)
+                != GlobalTelegramProxyConfiguration.ExistingSourceMode)
+        {
+            return null;
+        }
+
+        // 即使当前配置被停用，也保留 ProxyId；删除或切换账号时仍需回收
+        // 之前创建的稳定 Lease。这里不要求代理当前 IsEnabled。
+        var proxyId = GlobalTelegramProxyConfiguration.GetSelectedProxyId(
+            _configuration,
+            requireEnabled: false);
+        if (proxyId is not > 0)
+            return null;
+
+        return await _db.OutboundProxies
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                x => x.Id == proxyId.Value && x.Kind == OutboundProxyKinds.Resin,
+                cancellationToken);
+    }
+
+    /// <summary>
     /// 解除账号的代理绑定，并回收不再使用的账号专属代理资源。
     /// </summary>
     public async Task ReleaseAccountBindingAsync(
@@ -57,6 +172,7 @@ public sealed partial class ProxyManagementService
             return;
         }
 
+        var hadAccountProxy = account.ProxyId.HasValue;
         var currentProxyId = account.ProxyId ?? 0;
         if (expectedProxyId.HasValue && currentProxyId != expectedProxyId.Value)
             throw new ProxyBindingConflictException("账号代理绑定已变化，未执行删除清理");
@@ -85,9 +201,20 @@ public sealed partial class ProxyManagementService
             account.ProxyId = null;
             account.Proxy = null;
         }
+        else if (account.UseGlobalProxy)
+        {
+            // 全局代理没有账号级 ProxyId，但全局 Resin 仍会以
+            // tg_account_{id} 创建稳定 Lease；删除账号前必须使用当前配置
+            // 解析并释放该 Lease，不能只依赖导航属性。
+            oldProxy = await ResolveConfiguredGlobalResinProxyAsync(cancellationToken);
+            if (oldProxy != null)
+                await ReleaseResinLeaseAsync(oldProxy, accountId, cancellationToken);
+        }
 
-        if (oldProxy != null)
-            await _db.SaveChangesAsync(cancellationToken);
+        if (!hadAccountProxy && oldProxy == null)
+            return;
+
+        await _db.SaveChangesAsync(cancellationToken);
 
         if (oldProxy?.Kind != OutboundProxyKinds.Warp)
             return;
@@ -111,7 +238,8 @@ public sealed partial class ProxyManagementService
     public async Task<AccountProxyBatchResult> BindAccountsAsync(
         IReadOnlyCollection<int> accountIds,
         AccountProxyBindingInput input,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        ProxyConnectionOptions? expectedConnection = null)
     {
         var ids = accountIds.Where(x => x > 0).Distinct().ToArray();
         if (ids.Length == 0)
@@ -120,8 +248,7 @@ public sealed partial class ProxyManagementService
             throw new ArgumentException("单次最多处理 500 个账号");
 
         var strategy = NormalizeStrategy(input.Strategy);
-        if (strategy == "global")
-            _ = RequireGlobalProxy();
+        expectedConnection ??= input.ExpectedConnection;
         if (strategy == "warp_per_account" && ids.Length > 10)
             throw new ArgumentException("逐账号创建 WARP 单次最多处理 10 个账号");
 
@@ -174,6 +301,31 @@ public sealed partial class ProxyManagementService
                     ?? throw new KeyNotFoundException("所选代理不存在或已停用");
             }
 
+            ProxyConnectionOptions? currentGlobalConnection = null;
+            if (strategy == "global")
+            {
+                currentGlobalConnection = await ResolveGlobalProxyRequiredAsync(
+                    "tg_binding_validation",
+                    cancellationToken);
+            }
+
+            if (expectedConnection != null)
+            {
+                var currentConnection = strategy switch
+                {
+                    "global" => currentGlobalConnection,
+                    "existing" when targetProxy != null =>
+                        BuildPhysicalConnectionOptions(targetProxy),
+                    "direct" => null,
+                    _ => null
+                };
+                if (!SameBindingConnection(expectedConnection, currentConnection))
+                {
+                    throw new ProxyBindingConflictException(
+                        "导入或登录期间代理连接参数已变化，已阻止把账号绑定到不同出口");
+                }
+            }
+
             var accounts = await _db.Accounts
                 .Include(x => x.Proxy)
                 .Where(x => ids.Contains(x.Id))
@@ -193,6 +345,21 @@ public sealed partial class ProxyManagementService
                 .Where(x => x.ProxyId.HasValue && x.Proxy != null)
                 .Select(x => new PreviousProxyBinding(x.Id, x.Proxy!))
                 .ToList();
+
+            // global 路由没有账号级 ProxyId。切换到 direct/专属代理时，
+            // 仍需把当前全局 Resin 加入旧绑定清单，以释放稳定账号身份。
+            if (strategy != "global")
+            {
+                var globalResin = await ResolveConfiguredGlobalResinProxyAsync(
+                    cancellationToken);
+                if (globalResin != null)
+                {
+                    oldBindings.AddRange(
+                        accounts
+                            .Where(x => x.ProxyId == null && x.UseGlobalProxy)
+                            .Select(x => new PreviousProxyBinding(x.Id, globalResin)));
+                }
+            }
 
             var activationStates = accounts.ToDictionary(x => x.Id, x => x.IsActive);
             foreach (var account in accounts)
@@ -274,7 +441,9 @@ public sealed partial class ProxyManagementService
         var strategy = NormalizeStrategy(input.Strategy);
         if (strategy == "global")
         {
-            _ = RequireGlobalProxy();
+            _ = await ResolveGlobalProxyRequiredAsync(
+                "tg_binding_validation",
+                cancellationToken);
         }
         else if (strategy == "existing")
         {
@@ -354,6 +523,9 @@ public sealed partial class ProxyManagementService
     {
         foreach (var oldId in oldProxyIds.Where(x => x != targetProxyId).Distinct())
         {
+            if (IsEnabledGlobalProxy(oldId))
+                continue;
+
             var oldProxy = await _db.OutboundProxies
                 .Include(x => x.WarpProfile)
                 .FirstOrDefaultAsync(x => x.Id == oldId, cancellationToken);
@@ -405,6 +577,41 @@ public sealed partial class ProxyManagementService
             items.Count(x => x.Success),
             items.Count(x => !x.Success),
             items);
+
+    private static ProxyConnectionOptions BuildPhysicalConnectionOptions(
+        OutboundProxy proxy) =>
+        new(
+            proxy.Id,
+            proxy.Name,
+            proxy.Kind,
+            proxy.Protocol,
+            proxy.Host,
+            proxy.Port,
+            proxy.Username,
+            proxy.Password,
+            proxy.Secret);
+
+    private static bool SameBindingConnection(
+        ProxyConnectionOptions expected,
+        ProxyConnectionOptions? actual)
+    {
+        if (actual == null
+            || expected.ProxyId != actual.ProxyId
+            || !string.Equals(expected.Kind, actual.Kind, StringComparison.Ordinal)
+            || !string.Equals(expected.Protocol, actual.Protocol, StringComparison.Ordinal)
+            || !string.Equals(expected.Host, actual.Host, StringComparison.OrdinalIgnoreCase)
+            || expected.Port != actual.Port
+            || !string.Equals(expected.Password, actual.Password, StringComparison.Ordinal)
+            || !string.Equals(expected.Secret, actual.Secret, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        // Resin 的用户名包含临时/稳定账号身份，不能作为代理连接快照的
+        // 变化判据；其余代理的认证用户名必须保持一致。
+        return string.Equals(expected.Kind, OutboundProxyKinds.Resin, StringComparison.Ordinal)
+               || string.Equals(expected.Username, actual.Username, StringComparison.Ordinal);
+    }
 
     private sealed record PreviousProxyBinding(
         int AccountId,

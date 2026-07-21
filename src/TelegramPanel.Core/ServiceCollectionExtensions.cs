@@ -32,6 +32,7 @@ public static class ServiceCollectionExtensions
         services.AddScoped<IProxyEgressProbeService>(sp =>
             sp.GetRequiredService<ProxyEgressProbeService>());
         services.AddScoped<WarpContainerManager>();
+        services.AddScoped<GlobalProxyResolver>();
         services.AddScoped<ProxyManagementService>();
 
         // Bot API updates（getUpdates）统一轮询与分发：避免 409 Conflict

@@ -6,6 +6,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Logging.Abstractions;
 using TelegramPanel.Core.Interfaces;
+using TelegramPanel.Core.Models;
 using TelegramPanel.Core.Services.Proxy;
 using TelegramPanel.Data;
 using TelegramPanel.Data.Entities;
@@ -17,6 +18,89 @@ namespace TelegramPanel.Web.Tests;
 
 public sealed class GlobalProxyEgressTests
 {
+    [Fact]
+    public async Task 选择已有代理只保存引用且不会复制代理凭据()
+    {
+        var (localPath, configuration, environment) = await CreateSettingsContextAsync(
+            new Dictionary<string, string?>());
+        await using var connection = new SqliteConnection("Data Source=:memory:");
+        await connection.OpenAsync();
+        var db = new AppDbContext(new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite(connection)
+            .Options);
+        await db.Database.EnsureCreatedAsync();
+        var selected = new OutboundProxy
+        {
+            Name = "已有 Resin",
+            Kind = OutboundProxyKinds.Resin,
+            Protocol = OutboundProxyProtocols.Socks5,
+            Host = "resin.internal",
+            Port = 1080,
+            Password = "proxy-token",
+            ResinAdminToken = "admin-token",
+            ResinPlatform = "telegram",
+            IsEnabled = true
+        };
+        db.OutboundProxies.Add(selected);
+        await db.SaveChangesAsync();
+        var probe = new ProxyEgressProbeService();
+        var pool = new EmptyClientPool
+        {
+            OnRemoveAll = () =>
+            {
+                Assert.Equal(
+                    GlobalTelegramProxyConfiguration.ExistingSourceMode,
+                    configuration["Telegram:Proxy:SourceMode"]);
+                Assert.Equal(selected.Id.ToString(), configuration["Telegram:Proxy:ProxyId"]);
+                return Task.CompletedTask;
+            }
+        };
+        var service = new ProxyManagementService(
+            db,
+            pool,
+            probe,
+            new WarpContainerManager(
+                db,
+                configuration,
+                probe,
+                NullLogger<WarpContainerManager>.Instance),
+            NullLogger<ProxyManagementService>.Instance,
+            configuration);
+
+        try
+        {
+            await PanelAdminApiEndpoints.SaveGlobalProxySettingsAsync(
+                new SaveGlobalProxySettingsRequestDto(
+                    true,
+                    "socks5",
+                    "should-not-be-saved",
+                    9999,
+                    "should-not-be-saved",
+                    "should-not-be-saved",
+                    "",
+                    SourceMode: "existing",
+                    ProxyId: selected.Id),
+                configuration,
+                environment,
+                pool,
+                CancellationToken.None,
+                service);
+
+            var saved = await ReadSavedProxyAsync(localPath);
+            Assert.True(saved["Enabled"]?.GetValue<bool>());
+            Assert.Equal("existing", saved["SourceMode"]?.GetValue<string>());
+            Assert.Equal(selected.Id, saved["ProxyId"]?.GetValue<int>());
+            Assert.False(saved.ContainsKey("Server"));
+            Assert.False(saved.ContainsKey("Password"));
+            Assert.False(saved.ContainsKey("Secret"));
+        }
+        finally
+        {
+            await db.DisposeAsync();
+            TryDelete(localPath);
+        }
+    }
+
     [Fact]
     public void 全局代理设置响应只暴露凭据存在标记()
     {
@@ -345,6 +429,7 @@ public sealed class GlobalProxyEgressTests
     private sealed class EmptyClientPool : ITelegramClientPool
     {
         public int ActiveClientCount => 0;
+        public Func<Task>? OnRemoveAll { get; init; }
 
         public Task<Client> GetOrCreateClientAsync(
             int accountId,
@@ -358,7 +443,7 @@ public sealed class GlobalProxyEgressTests
 
         public Client? GetClient(int accountId) => null;
         public Task RemoveClientAsync(int accountId) => Task.CompletedTask;
-        public Task RemoveAllClientsAsync() => Task.CompletedTask;
+        public Task RemoveAllClientsAsync() => OnRemoveAll?.Invoke() ?? Task.CompletedTask;
         public bool IsClientConnected(int accountId) => false;
     }
 

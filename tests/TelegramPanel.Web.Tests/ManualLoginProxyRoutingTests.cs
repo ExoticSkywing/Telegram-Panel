@@ -537,6 +537,38 @@ public sealed class ManualLoginProxyRoutingTests
     }
 
     [Fact]
+    public async Task 全局WARP仍属另一临时创建流程时登录不会冻结该出口()
+    {
+        await using var fixture = await Fixture.CreateAsync();
+        var proxy = await fixture.AddProxyAsync(OutboundProxyKinds.Warp);
+        var profile = new WarpProfile
+        {
+            ProfileId = "active-global-login-owner",
+            RequestId = "telegram-panel.internal.login.active-global-owner",
+            ContainerName = "active-global-login-owner-container",
+            ContainerId = "active-global-login-owner-container-id",
+            VolumeName = "active-global-login-owner-volume",
+            HostPort = 42097,
+            Status = "active",
+            DesiredEnabled = true,
+            Proxy = proxy
+        };
+        fixture.Db.WarpProfiles.Add(profile);
+        await fixture.Db.SaveChangesAsync();
+        fixture.Configuration["Telegram:Proxy:Enabled"] = "true";
+        fixture.Configuration["Telegram:Proxy:SourceMode"] =
+            GlobalTelegramProxyConfiguration.ExistingSourceMode;
+        fixture.Configuration["Telegram:Proxy:ProxyId"] = proxy.Id.ToString();
+
+        using var ownerClaim = fixture.TemporaryWarpClaims.ClaimRequest(profile.RequestId);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            fixture.Coordinator.PrepareAsync(1605, "global", null));
+
+        Assert.Contains("另一个账号首次连接流程", error.Message);
+        Assert.False(fixture.Coordinator.HasState(1605));
+    }
+
+    [Fact]
     public async Task 显式直连只有在用户明确选择后才会启用账号()
     {
         await using var fixture = await Fixture.CreateAsync();
@@ -671,6 +703,7 @@ public sealed class ManualLoginProxyRoutingTests
         private Fixture(
             SqliteConnection connection,
             AppDbContext db,
+            IConfigurationRoot configuration,
             AccountLoginProxyStateStore stateStore,
             AccountLoginProxyCoordinator coordinator,
             StubClientPool clientPool,
@@ -678,6 +711,7 @@ public sealed class ManualLoginProxyRoutingTests
         {
             _connection = connection;
             Db = db;
+            Configuration = configuration;
             StateStore = stateStore;
             Coordinator = coordinator;
             ClientPool = clientPool;
@@ -685,6 +719,7 @@ public sealed class ManualLoginProxyRoutingTests
         }
 
         public AppDbContext Db { get; }
+        public IConfigurationRoot Configuration { get; }
         public AccountLoginProxyStateStore StateStore { get; }
         public AccountLoginProxyCoordinator Coordinator { get; }
         public StubClientPool ClientPool { get; }
@@ -702,8 +737,8 @@ public sealed class ManualLoginProxyRoutingTests
             await db.Database.EnsureCreatedAsync();
 
             var configurationBuilder = new ConfigurationBuilder();
-            if (values != null)
-                configurationBuilder.AddInMemoryCollection(values);
+            configurationBuilder.AddInMemoryCollection(
+                values ?? Array.Empty<KeyValuePair<string, string?>>());
             var configuration = configurationBuilder.Build();
             var pool = new StubClientPool();
             var probe = new ProxyEgressProbeService();
@@ -748,6 +783,7 @@ public sealed class ManualLoginProxyRoutingTests
             return new Fixture(
                 connection,
                 db,
+                configuration,
                 stateStore,
                 coordinator,
                 pool,

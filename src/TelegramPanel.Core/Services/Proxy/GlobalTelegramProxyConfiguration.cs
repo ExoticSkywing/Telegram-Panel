@@ -8,6 +8,47 @@ namespace TelegramPanel.Core.Services.Proxy;
 /// </summary>
 public static class GlobalTelegramProxyConfiguration
 {
+    public const string ManualSourceMode = "manual";
+    public const string ExistingSourceMode = "existing";
+
+    public static string GetSourceMode(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        var value = (configuration["Telegram:Proxy:SourceMode"] ?? string.Empty)
+            .Trim()
+            .ToLowerInvariant();
+        return string.IsNullOrWhiteSpace(value) ? ManualSourceMode : value;
+    }
+
+    public static int? GetSelectedProxyId(
+        IConfiguration configuration,
+        bool requireEnabled = true)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        if (requireEnabled && !IsEnabled(configuration))
+            return null;
+        if (GetSourceMode(configuration) != ExistingSourceMode)
+            return null;
+
+        return int.TryParse(configuration["Telegram:Proxy:ProxyId"], out var id) && id > 0
+            ? id
+            : null;
+    }
+
+    public static bool IsEnabled(IConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        var enabledText = (configuration["Telegram:Proxy:Enabled"] ?? string.Empty).Trim();
+        if (bool.TryParse(enabledText, out var enabled))
+            return enabled;
+
+        if (GetSourceMode(configuration) == ExistingSourceMode)
+            return GetSelectedProxyId(configuration, requireEnabled: false).HasValue;
+
+        return !string.IsNullOrWhiteSpace(configuration["Telegram:Proxy:Server"])
+               || !string.IsNullOrWhiteSpace(configuration["Telegram:Proxy:Port"]);
+    }
+
     /// <summary>
     /// 解析必须存在的 Telegram 全局代理。选择全局代理属于明确的出站路由，
     /// 配置缺失时绝不能静默降级为面板直连。
@@ -20,6 +61,14 @@ public static class GlobalTelegramProxyConfiguration
     public static ProxyConnectionOptions? Build(IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(configuration);
+
+        if (GetSourceMode(configuration) == ExistingSourceMode)
+        {
+            if (!IsEnabled(configuration))
+                return null;
+            throw new InvalidOperationException(
+                "Telegram 全局代理引用已有代理，必须通过数据库解析，已阻止使用过期配置或降级为直连");
+        }
 
         var enabledText = (configuration["Telegram:Proxy:Enabled"] ?? string.Empty).Trim();
         bool? explicitlyEnabled = bool.TryParse(enabledText, out var enabled) ? enabled : null;

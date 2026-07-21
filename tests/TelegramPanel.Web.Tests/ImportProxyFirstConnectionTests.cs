@@ -25,6 +25,54 @@ namespace TelegramPanel.Web.Tests;
 public sealed class ImportProxyFirstConnectionTests
 {
     [Fact]
+    public async Task 全局WARP导入与自动维护双向互斥且不会提前连接()
+    {
+        var usageGuard = new AccountLoginProxyStateStore();
+        await using var fixture = await ImportFixture.CreateAsync(
+            OutboundProxyProtocols.Http,
+            new Dictionary<string, string?>
+            {
+                ["Telegram:Proxy:Enabled"] = "true",
+                ["Telegram:Proxy:SourceMode"] = GlobalTelegramProxyConfiguration.ExistingSourceMode,
+                ["Telegram:Proxy:ProxyId"] = "1"
+            },
+            usageGuard);
+        fixture.Proxy.Kind = OutboundProxyKinds.Warp;
+        await fixture.Db.SaveChangesAsync();
+
+        using (var maintenanceLease = usageGuard.TryAcquireMaintenance(fixture.Proxy.Id))
+        {
+            Assert.NotNull(maintenanceLease);
+            var blocked = await fixture.Service.ImportFromStringSessionAsync(
+                "session-data",
+                12345,
+                "0123456789abcdef0123456789abcdef",
+                proxyBinding: new AccountProxyBindingInput("global"));
+
+            Assert.False(blocked.Success);
+            Assert.Contains("正在维护", blocked.Error);
+            Assert.Equal(0, fixture.Importer.ImportCount);
+        }
+
+        fixture.Importer.BeforeImport = () =>
+        {
+            Assert.True(usageGuard.OwnsWarpProxy(fixture.Proxy.Id));
+            Assert.Null(usageGuard.TryAcquireMaintenance(fixture.Proxy.Id));
+        };
+        var imported = await fixture.Service.ImportFromStringSessionAsync(
+            "session-data",
+            12345,
+            "0123456789abcdef0123456789abcdef",
+            proxyBinding: new AccountProxyBindingInput("global"));
+
+        Assert.True(imported.Success, imported.Error);
+        Assert.False(usageGuard.OwnsWarpProxy(fixture.Proxy.Id));
+        var account = await fixture.Db.Accounts.AsNoTracking().SingleAsync();
+        Assert.Null(account.ProxyId);
+        Assert.True(account.UseGlobalProxy);
+    }
+
+    [Fact]
     public async Task 已有WARP导入与自动维护双向互斥且不会提前连接()
     {
         var usageGuard = new AccountLoginProxyStateStore();
@@ -806,6 +854,7 @@ public sealed class ImportProxyFirstConnectionTests
                 probe,
                 warp,
                 NullLogger<ProxyManagementService>.Instance,
+                configuration,
                 temporaryWarpClaims: temporaryWarpClaims,
                 warpProxyUsageGuard: warpProxyUsageGuard);
             var accountManagement = new AccountManagementService(

@@ -44,7 +44,7 @@ public sealed class AccountProxyResolver : IAccountProxyResolver
         if (!account.ProxyId.HasValue)
         {
             return account.UseGlobalProxy
-                ? ResolveGlobalProxy()
+                ? await ResolveGlobalProxyAsync(db, accountId, cancellationToken)
                 : new AccountProxyResolution(null, false);
         }
         if (account.Proxy is not { IsEnabled: true } proxy)
@@ -55,9 +55,14 @@ public sealed class AccountProxyResolver : IAccountProxyResolver
             false);
     }
 
-    private AccountProxyResolution ResolveGlobalProxy() =>
+    private async Task<AccountProxyResolution> ResolveGlobalProxyAsync(
+        AppDbContext db,
+        int accountId,
+        CancellationToken cancellationToken) =>
         new(
-            GlobalTelegramProxyConfiguration.BuildRequired(_configuration),
+            await new GlobalProxyResolver(db, _configuration).ResolveRequiredAsync(
+                $"tg_account_{accountId}",
+                cancellationToken),
             false);
 
     public static ProxyConnectionOptions BuildConnectionOptions(

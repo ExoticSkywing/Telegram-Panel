@@ -49,6 +49,8 @@ Docker 下常用环境变量（见 `docker-compose.yml`）：
 - `ConnectionStrings__DefaultConnection`：SQLite 路径（默认 `/data/telegram-panel.db`）
 - `Telegram__SessionsPath`：session 目录（默认 `/data/sessions`）
 - `Telegram__Proxy__Enabled`：显式启用或关闭 Telegram 全局代理
+- `Telegram__Proxy__SourceMode`：`manual`（手动地址）或 `existing`（引用代理表中的代理）
+- `Telegram__Proxy__ProxyId`：`SourceMode=existing` 时引用的代理 ID
 - `Telegram__Proxy__Protocol`：全局代理协议，支持 `http`、`socks5`、`mtproto`
 - `Telegram__Proxy__Server` / `Telegram__Proxy__Port`：Telegram 全局代理地址和端口
 - `Telegram__Proxy__Username` / `Telegram__Proxy__Password`：SOCKS5 代理认证（可选）
@@ -117,6 +119,8 @@ Docker 下常用环境变量（见 `docker-compose.yml`）：
 - HTTP / SOCKS5 按需填写 `Username`、`Password`。
 - MTProxy 填写 `Secret`，不需要用户名和密码。
 - `Enabled=false` 会显式关闭全局代理，即使环境变量仍保留旧地址也不会重新启用。
+- `SourceMode=existing` 时必须同时设置有效的 `ProxyId`；代理停用或删除后会闭锁连接，
+  不会静默回退为面板直连。后台代理管理页会自动写入这两个字段。
 - 后台停用时会保留已保存的连接参数；凭据不会回显，编辑留空表示保持原值。
 - 账号管理中的“已有代理”优先于全局设置；“直连”会明确绕过全局代理；“全局设置”可恢复继承该配置。升级前已有账号默认继续继承全局设置。
 - Docker 部署的配置文件位于宿主机 `docker-data/appsettings.local.json`。容器内的 `127.0.0.1` 指向容器自身；访问宿主机代理时应使用容器可访问的宿主机地址（Docker Desktop 通常可用 `host.docker.internal`），并确保代理监听地址和防火墙允许容器连接。

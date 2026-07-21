@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 using TelegramPanel.Core.Models;
 using TelegramPanel.Data.Entities;
 
@@ -29,6 +31,12 @@ public interface IProxyEgressProbeService
 public sealed class ProxyEgressProbeService : IProxyEgressProbeService
 {
     private static readonly Uri ProbeUri = new("https://cloudflare.com/cdn-cgi/trace");
+    private static readonly Uri GeoLookupBaseUri = new("https://ipwhois.app/json/");
+    private static readonly ConcurrentDictionary<string, GeoCacheEntry> GeoCache = new();
+    private static readonly object GeoCacheWriteLock = new();
+    private static readonly TimeSpan GeoCacheLifetime = TimeSpan.FromHours(6);
+    private static readonly TimeSpan GeoFailureCacheLifetime = TimeSpan.FromMinutes(15);
+    internal const int MaxGeoCacheEntries = 4096;
     private const int MaxResponseBytes = 256 * 1024;
 
     public Task<EgressProbeResult> ProbePanelAsync(CancellationToken cancellationToken = default)
@@ -135,13 +143,15 @@ public sealed class ProxyEgressProbeService : IProxyEgressProbeService
                 if (requireWarp && warpStatus is not ("on" or "plus"))
                     throw new InvalidDataException($"Cloudflare Trace 未报告 WARP 已启用：warp={warpStatus ?? "unknown"}");
 
+                var geo = await ResolveGeoMetadataAsync(ip, cancellationToken);
+
                 stopwatch.Stop();
                 return new EgressProbeResult(
                     true,
                     ip.ToString(),
-                    NormalizeOptional(country),
-                    null,
-                    null,
+                    geo?.Country ?? NormalizeOptional(country),
+                    geo?.Location,
+                    geo?.Isp,
                     NormalizeOptional(warpStatus),
                     (int)Math.Min(int.MaxValue, stopwatch.ElapsedMilliseconds),
                     checkedAtUtc,
@@ -197,6 +207,171 @@ public sealed class ProxyEgressProbeService : IProxyEgressProbeService
         return values;
     }
 
+    private static async Task<GeoMetadata?> ResolveGeoMetadataAsync(
+        IPAddress ip,
+        CancellationToken cancellationToken)
+    {
+        var key = ip.ToString();
+        if (GeoCache.TryGetValue(key, out var cached)
+            && DateTime.UtcNow - cached.CachedAtUtc < (cached.Metadata == null
+                ? GeoFailureCacheLifetime
+                : GeoCacheLifetime))
+        {
+            return cached.Metadata;
+        }
+
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(8));
+        try
+        {
+            using var handler = new SocketsHttpHandler
+            {
+                UseProxy = false,
+                AllowAutoRedirect = false,
+                ConnectTimeout = TimeSpan.FromSeconds(5),
+                PooledConnectionLifetime = TimeSpan.FromMinutes(1)
+            };
+            using var client = new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(8)
+            };
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get,
+                new Uri(GeoLookupBaseUri, Uri.EscapeDataString(key)));
+            request.Headers.UserAgent.ParseAdd("TelegramPanel-EgressProbe/1.0");
+            request.Headers.Accept.ParseAdd("application/json");
+
+            using var response = await client.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                timeout.Token);
+            if (!response.IsSuccessStatusCode)
+            {
+                CacheGeoMetadata(key, null);
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(timeout.Token);
+            var json = await ReadLimitedAsync(stream, timeout.Token);
+            var metadata = ParseGeoMetadata(json, ip);
+            CacheGeoMetadata(key, metadata);
+            return metadata;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            CacheGeoMetadata(key, null);
+            return null;
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            CacheGeoMetadata(key, null);
+            return null;
+        }
+    }
+
+    internal static int GeoCacheEntryCount => GeoCache.Count;
+
+    internal static void CacheGeoMetadata(
+        string key,
+        GeoMetadata? metadata,
+        DateTime? cachedAtUtc = null)
+    {
+        lock (GeoCacheWriteLock)
+        {
+            GeoCache[key] = new GeoCacheEntry(metadata, cachedAtUtc ?? DateTime.UtcNow);
+            if (GeoCache.Count <= MaxGeoCacheEntries)
+                return;
+
+            var removeCount = GeoCache.Count - MaxGeoCacheEntries;
+            foreach (var candidate in GeoCache
+                         .OrderBy(entry => entry.Value.CachedAtUtc)
+                         .Take(removeCount))
+            {
+                GeoCache.TryRemove(candidate.Key, out _);
+            }
+        }
+    }
+
+    internal static GeoMetadata? ParseGeoMetadata(string json, IPAddress expectedIp)
+    {
+        ArgumentNullException.ThrowIfNull(expectedIp);
+        if (string.IsNullOrWhiteSpace(json))
+            return null;
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !ReadBoolean(root, "success", fallback: true))
+        {
+            return null;
+        }
+
+        var returnedIp = ReadString(root, "ip");
+        if (!IPAddress.TryParse(returnedIp, out var parsedIp)
+            || !parsedIp.Equals(expectedIp))
+        {
+            return null;
+        }
+
+        var country = ReadString(root, "country");
+        var countryCode = ReadString(root, "country_code");
+        if (string.IsNullOrWhiteSpace(country))
+            country = countryCode;
+
+        var region = ReadString(root, "region");
+        var city = ReadString(root, "city");
+        var location = JoinDistinct(region, city);
+        var isp = ReadString(root, "isp") ?? ReadString(root, "org");
+
+        country = Limit(country, 100);
+        location = Limit(location, 100);
+        isp = Limit(isp, 200);
+        return country == null && location == null && isp == null
+            ? null
+            : new GeoMetadata(country, location, isp);
+    }
+
+    private static string? ReadString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value)
+            || value.ValueKind != JsonValueKind.String)
+        {
+            return null;
+        }
+
+        return NormalizeOptional(value.GetString());
+    }
+
+    private static bool ReadBoolean(JsonElement root, string name, bool fallback)
+    {
+        if (!root.TryGetProperty(name, out var value))
+            return fallback;
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => fallback
+        };
+    }
+
+    private static string? JoinDistinct(params string?[] values)
+    {
+        var normalized = values
+            .Select(NormalizeOptional)
+            .Where(value => value != null)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return normalized.Length == 0 ? null : string.Join(" · ", normalized!);
+    }
+
+    private static string? Limit(string? value, int maxLength)
+    {
+        value = NormalizeOptional(value);
+        return value is { Length: > 0 }
+            ? value.Length <= maxLength ? value : value[..maxLength]
+            : null;
+    }
+
     private static bool IsPublicAddress(IPAddress address)
     {
         if (IPAddress.IsLoopback(address)
@@ -243,4 +418,8 @@ public sealed class ProxyEgressProbeService : IProxyEgressProbeService
         var message = exception.Message.Replace('\r', ' ').Replace('\n', ' ').Trim();
         return message.Length <= 500 ? message : message[..500];
     }
+
+    internal sealed record GeoMetadata(string? Country, string? Location, string? Isp);
+
+    private sealed record GeoCacheEntry(GeoMetadata? Metadata, DateTime CachedAtUtc);
 }

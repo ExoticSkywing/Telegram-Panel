@@ -546,6 +546,9 @@ public sealed partial class ProxyManagementService
         OutboundProxy proxy,
         CancellationToken cancellationToken)
     {
+        if (IsEnabledGlobalProxy(proxy.Id))
+            throw new ProxyInUseException("该代理正在作为账号全局代理使用");
+
         var stillUsed = await _db.Accounts.AnyAsync(
             x => x.ProxyId == proxy.Id,
             cancellationToken);

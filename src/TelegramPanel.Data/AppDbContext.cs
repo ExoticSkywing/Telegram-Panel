@@ -30,6 +30,7 @@ public class AppDbContext : DbContext
     public DbSet<BotChannelCategory> BotChannelCategories => Set<BotChannelCategory>();
     public DbSet<BotChannelMember> BotChannelMembers => Set<BotChannelMember>();
     public DbSet<OutboundProxy> OutboundProxies => Set<OutboundProxy>();
+    public DbSet<ProxyCategory> ProxyCategories => Set<ProxyCategory>();
     public DbSet<WarpProfile> WarpProfiles => Set<WarpProfile>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -307,6 +308,17 @@ public class AppDbContext : DbContext
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        // 代理分类配置
+        modelBuilder.Entity<ProxyCategory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Name).IsRequired().HasMaxLength(100);
+            entity.Property(e => e.Color).HasMaxLength(20);
+            entity.Property(e => e.Description).HasMaxLength(500);
+
+            entity.HasIndex(e => e.Name).IsUnique();
+        });
+
         // 出站代理配置
         modelBuilder.Entity<OutboundProxy>(entity =>
         {
@@ -341,10 +353,16 @@ public class AppDbContext : DbContext
             entity.Property(e => e.EgressIsp).HasMaxLength(200);
 
             entity.HasIndex(e => e.Name);
+            entity.HasIndex(e => e.CategoryId);
             entity.HasIndex(e => new { e.IsEnabled, e.Kind });
             entity.HasIndex(e => e.Protocol);
             entity.HasIndex(e => e.TestStatus);
             entity.HasIndex(e => e.EgressIp);
+
+            entity.HasOne(e => e.Category)
+                .WithMany(c => c.Proxies)
+                .HasForeignKey(e => e.CategoryId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         // WARP 容器与代理的一对一映射

@@ -16,7 +16,8 @@ backend, and a **Vue 3** management UI.
   export; phone-code, QR-code, and 2FA login.
 - **Account-bound proxies:** HTTP, SOCKS5, MTProxy,
   [Resin](https://github.com/Resinat/Resin) sticky routes, and managed Cloudflare WARP,
-  with per-account and batch binding plus egress checks.
+  with per-account and batch binding, categories, used/unused filters, and egress IP,
+  location, city, and ISP checks.
 - **Safe first connection:** import and login select and freeze the route before the first
   Telegram request instead of connecting directly and changing IP afterward.
 - **Account maintenance:** status checks, invalid-account cleanup, device logout, 2FA, and
@@ -34,6 +35,11 @@ Existing-account Telegram operations use the route assigned to that account. Mod
 call host account services with an `accountId`; they should not duplicate proxy credentials or
 construct a separate `WTelegram.Client`. The host client pool applies the account's current
 HTTP, SOCKS5, MTProxy, WARP, Resin, global-proxy, or explicit-direct route.
+
+Selecting an existing proxy during import or login persists that proxy ID on the account until
+an operator changes it. Selecting the global route instead keeps the account subscribed to later
+global-route changes; explicit direct mode bypasses both account and global proxies. The global
+route can reference any enabled manual, Resin, or WARP entry without copying its credentials.
 
 Module-owned `HttpClient` and third-party API traffic do not automatically inherit an account
 route. Configure those connections separately only when the module itself needs it.
@@ -74,6 +80,9 @@ Set the automatic-creation default to `http` or `socks5` in `.env`:
 ```dotenv
 TP_WARP_PROXY_PROTOCOL=http
 ```
+
+Each managed WARP creates one Docker container and one persistent volume. Per-account WARP batch
+imports therefore create one container per account; size the host memory and CPU accordingly.
 
 Managed WARP health checks run every five minutes by default. Two consecutive failures trigger
 a container restart, egress recheck, and reconnection of bound account clients without any

@@ -16,6 +16,15 @@ export type ProxyKind = 'manual' | 'resin' | 'warp'
 
 export type ProxyProtocol = 'http' | 'socks5' | 'mtproto'
 export type WarpProxyProtocol = Extract<ProxyProtocol, 'http' | 'socks5'>
+export type GlobalProxySourceMode = 'manual' | 'existing'
+
+export interface ProxyCategory {
+  id: number
+  name: string
+  color?: string | null
+  description?: string | null
+  proxyCount?: number
+}
 
 export interface NetworkEgress {
   success: boolean
@@ -60,6 +69,10 @@ export interface OutboundProxy {
   lastTestedAtUtc?: string | null
   firstBoundAtUtc?: string | null
   accountCount?: number
+  category?: ProxyCategory | null
+  isGlobal?: boolean
+  isInUse?: boolean
+  usageCount?: number
   createdAtUtc: string
   updatedAtUtc: string
 }
@@ -78,6 +91,7 @@ export interface SaveOutboundProxyRequest {
   resinAdminUrl?: string | null
   resinAdminToken?: string | null
   clearResinAdminToken?: boolean
+  categoryId?: number | null
   isEnabled: boolean
   testAfterSave: boolean
 }
@@ -378,6 +392,10 @@ export interface TelegramApiSettings {
 
 export interface GlobalProxySettings {
   enabled: boolean
+  sourceMode: GlobalProxySourceMode
+  proxyId?: number | null
+  proxyName?: string | null
+  proxyKind?: ProxyKind | null
   protocol: ProxyProtocol
   server: string
   port: number
@@ -388,6 +406,8 @@ export interface GlobalProxySettings {
 
 export interface SaveGlobalProxySettingsRequest {
   enabled: boolean
+  sourceMode: GlobalProxySourceMode
+  proxyId?: number | null
   protocol: ProxyProtocol
   server: string
   port: number
