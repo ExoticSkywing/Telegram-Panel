@@ -858,6 +858,9 @@ public sealed class WarpLifecycleRegressionTests
         public string? LastCreatedProtocol { get; private set; }
         public IReadOnlyCollection<string> Containers => _containers.Select(x => x.Id).ToArray();
         public IReadOnlyCollection<string> Volumes => _volumes.Keys.ToArray();
+        public Queue<Exception> StartErrors { get; } = new();
+        public List<int> CreatedHostPorts { get; } = new();
+        public List<string> StartAttemptedContainerReferences { get; } = new();
         public List<string> StartedContainerReferences { get; } = new();
         public List<string> StoppedContainerReferences { get; } = new();
         public List<string> RestartedContainerReferences { get; } = new();
@@ -909,6 +912,7 @@ public sealed class WarpLifecycleRegressionTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             LastCreatedProtocol = settings.Protocol;
+            CreatedHostPorts.Add(hostPort);
             var id = $"fake-container-{++_nextContainerId}";
             _containers.Add(new ContainerResource(id, containerName, profileId));
             return Task.FromResult(id);
@@ -919,6 +923,9 @@ public sealed class WarpLifecycleRegressionTests
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            StartAttemptedContainerReferences.Add(containerId);
+            if (StartErrors.Count > 0)
+                throw StartErrors.Dequeue();
             if (StartError != null)
                 throw StartError;
             StartedContainerReferences.Add(containerId);

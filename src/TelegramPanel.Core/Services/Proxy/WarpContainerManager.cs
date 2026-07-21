@@ -19,6 +19,7 @@ public sealed class WarpContainerManager
 {
     private const string OwnerLabel = "com.telegram-panel.warp";
     private const string ProfileLabel = "com.telegram-panel.warp.profile";
+    private const int MaxHostPortConflictRetries = 100;
     private static readonly SemaphoreSlim LifecycleLock = new(1, 1);
 
     private readonly AppDbContext _db;
@@ -239,19 +240,13 @@ public sealed class WarpContainerManager
                 await docker.EnsureImageAsync(settings.Image, settings.PullIfMissing, token);
                 await docker.CreateVolumeAsync(volumeName, profileId, token);
 
-                var containerId = await docker.CreateContainerAsync(
+                await CreateAndStartContainerWithPortRetryAsync(
+                    docker,
                     settings,
-                    profileId,
-                    containerName,
-                    volumeName,
+                    profile,
+                    createdProxy,
                     hostPort,
                     token);
-                profile.ContainerId = containerId;
-                profile.Status = "starting";
-                profile.UpdatedAtUtc = DateTime.UtcNow;
-                await _db.SaveChangesAsync(token);
-
-                await docker.StartContainerAsync(containerId, token);
 
                 EgressProbeResult? probe = null;
                 for (var attempt = 1; attempt <= 35; attempt++)
@@ -579,6 +574,86 @@ public sealed class WarpContainerManager
         proxy.UpdatedAtUtc = now;
     }
 
+    private async Task CreateAndStartContainerWithPortRetryAsync(
+        IWarpDockerClient docker,
+        WarpSettings settings,
+        WarpProfile profile,
+        OutboundProxy proxy,
+        int initialHostPort,
+        CancellationToken cancellationToken)
+    {
+        var hostPort = initialHostPort;
+        var conflictCount = 0;
+        while (true)
+        {
+            string? containerId = null;
+            try
+            {
+                containerId = await docker.CreateContainerAsync(
+                    settings,
+                    profile.ProfileId,
+                    profile.ContainerName,
+                    profile.VolumeName,
+                    hostPort,
+                    cancellationToken);
+                profile.ContainerId = containerId;
+                profile.HostPort = hostPort;
+                profile.Status = "starting";
+                profile.UpdatedAtUtc = DateTime.UtcNow;
+                if (settings.ProxyHostMode == "published")
+                {
+                    proxy.Port = hostPort;
+                    proxy.UpdatedAtUtc = DateTime.UtcNow;
+                }
+                await _db.SaveChangesAsync(cancellationToken);
+
+                await docker.StartContainerAsync(containerId, cancellationToken);
+                return;
+            }
+            catch (Exception ex) when (
+                settings.ProxyHostMode == "published"
+                && IsHostPortConflict(ex))
+            {
+                conflictCount++;
+                if (!string.IsNullOrWhiteSpace(containerId))
+                {
+                    // Docker 在 start 阶段发现端口冲突时会留下 stopped 容器，
+                    // 必须先删除容器壳才能使用同名配置重试；数据卷继续保留。
+                    await docker.RemoveContainerAsync(containerId, cancellationToken);
+                    profile.ContainerId = null;
+                }
+
+                if (conflictCount >= MaxHostPortConflictRetries || hostPort >= 65535)
+                {
+                    throw new InvalidOperationException(
+                        $"WARP 连续遇到 {conflictCount} 次宿主端口冲突，没有可用端口",
+                        ex);
+                }
+
+                var previousPort = hostPort;
+                hostPort = await AllocateHostPortAsync(
+                    previousPort + 1,
+                    requireHostPort: true,
+                    cancellationToken);
+                var retryAt = DateTime.UtcNow;
+                profile.HostPort = hostPort;
+                profile.Status = "creating";
+                profile.LastError = $"宿主端口 {previousPort} 被占用，已自动切换为 {hostPort}";
+                profile.UpdatedAtUtc = retryAt;
+                proxy.Port = hostPort;
+                proxy.LastError = profile.LastError;
+                proxy.UpdatedAtUtc = retryAt;
+                await _db.SaveChangesAsync(cancellationToken);
+
+                _logger.LogWarning(
+                    ex,
+                    "Managed WARP host port {PreviousPort} was occupied; retrying with {HostPort}",
+                    previousPort,
+                    hostPort);
+            }
+        }
+    }
+
     private async Task<int> AllocateHostPortAsync(
         int start,
         bool requireHostPort,
@@ -611,6 +686,24 @@ public sealed class WarpContainerManager
         {
             return false;
         }
+    }
+
+    private static bool IsHostPortConflict(Exception exception)
+    {
+        for (var current = exception; current != null; current = current.InnerException)
+        {
+            var message = current.Message;
+            if (message.Contains("port is already allocated", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("failed to bind host port", StringComparison.OrdinalIgnoreCase)
+                || message.Contains("bind: address already in use", StringComparison.OrdinalIgnoreCase)
+                || (message.Contains("Bind for", StringComparison.OrdinalIgnoreCase)
+                    && message.Contains("failed", StringComparison.OrdinalIgnoreCase)))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private async Task TrySaveAsync(CancellationToken cancellationToken)

@@ -153,6 +153,10 @@ TP_WARP_PROXY_PROTOCOL=socks5
 `http` 或 `socks5`，未设置时默认 `http`。WARP 镜像的 GOST 监听端口同时支持
 HTTP 与 SOCKS5；代理管理中的一键创建弹窗还可以只覆盖本次创建的协议。
 
+默认 `container` 模式不会占用宿主机端口。若自定义为 `published` 模式，面板会从
+`Proxy:Warp:HostPortStart`（默认 `42080`）开始向后寻找可用端口；即使端口在 Docker
+启动前一瞬间被其他进程抢占，也会清理失败容器、保留 WARP 数据卷，并自动改用下一端口。
+
 受管 WARP 默认每 5 分钟自动检测出口，连续失败 2 次后重启容器并复测；恢复前后会
 释放绑定账号的客户端，让它们仍通过原 WARP 路由重连，绝不回退面板直连。健康出口
 默认不会定时重启，避免无故更换 Telegram 账号 IP；如需参考 tokens-pro 的 720 分钟

@@ -67,6 +67,11 @@ TP_WARP_PROXY_PROTOCOL=http
 WARP 镜像中的 GOST 端口同时支持 HTTP 和 SOCKS5。默认协议决定登录、导入和批量绑定
 自动创建 WARP 时宿主使用哪种握手；代理管理中的一键创建弹窗可以覆盖单次创建协议。
 
+默认 `container` 模式由 Docker 网络按容器名访问，不占用宿主机代理端口。若在其他
+拓扑中把 `Proxy:Warp:ProxyHostMode` 配为 `published`，面板会从
+`Proxy:Warp:HostPortStart`（默认 `42080`）开始递增寻找空闲端口。若检测通过后端口又在
+Docker 创建或启动时被抢占，面板会删除失败的容器壳、保留数据卷，并继续尝试下一端口。
+
 ## 自动巡检与故障恢复
 
 Docker 的 `unless-stopped` 只能处理容器进程退出，不能处理“容器仍显示 running，
