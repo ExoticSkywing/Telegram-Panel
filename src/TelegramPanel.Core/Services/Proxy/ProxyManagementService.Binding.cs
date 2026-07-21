@@ -307,9 +307,11 @@ public sealed partial class ProxyManagementService
         if (expectedProxyId.HasValue && currentProxyId != expectedProxyId.Value)
             throw new ProxyBindingConflictException("账号代理绑定已变化，未创建 WARP");
 
+        var requestId = $"account-{accountId}-{Guid.NewGuid():N}";
+        using var temporaryWarpClaim = _temporaryWarpClaims?.ClaimRequest(requestId);
         var newProxy = await _warpManager.CreateAsync(
             $"WARP · {accountSnapshot.DisplayPhone}",
-            $"account-{accountId}-{Guid.NewGuid():N}",
+            requestId,
             cancellationToken);
         var keep = false;
         try
