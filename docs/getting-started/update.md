@@ -2,6 +2,23 @@
 
 > 更新前建议先备份：`./docker-data/telegram-panel.db` 与 `./docker-data/`（尤其是重要账号的 sessions）。
 
+## 更新策略
+
+Docker 部署支持通过项目根目录 `.env` 的 `TP_UPDATE_MODE` 切换更新方式：
+
+- `auto`（默认）：镜像版本和面板二进制版本都可用，启动时优先使用版本更高且已确认成功的程序；
+- `image`：只运行 Docker 镜像内的 `/app`，适合统一由 CI/CD、Watchtower 或人工 `docker compose pull` 发布；
+- `binary`：优先运行面板一键更新落地到 `/data/app-current` 的二进制，适合不想因镜像更新覆盖临时版本的场景。
+
+修改 `.env` 后必须重建容器使入口策略生效：
+
+```bash
+TP_UPDATE_MODE=image
+docker compose up -d --force-recreate
+```
+
+更新策略只决定程序来源，不会自动替用户执行 Docker 编排。镜像模式的实际发布仍使用 `TP_IMAGE`、`docker compose pull` 和 `docker compose up -d`。
+
 > **重要：** 如果当前账号列表已经在旧版一键更新后变空，先不要再次点击“一键更新”。
 > `v1.31.31` 及更早版本的旧更新器可能在切换目录前删除原有 `app-previous`，
 > 而有效旧库可能就在其中。请先停止容器并同时备份宿主机 `docker-data` 与容器内 `/app`：

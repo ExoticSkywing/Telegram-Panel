@@ -9,6 +9,17 @@ namespace TelegramPanel.Web.Tests;
 
 public sealed class AppSelfUpdateServiceTests
 {
+    [Theory]
+    [InlineData("auto", "auto")]
+    [InlineData("IMAGE", "image")]
+    [InlineData(" binary ", "binary")]
+    [InlineData("unsupported", "auto")]
+    [InlineData(null, "auto")]
+    public void SelfUpdateMode_NormalizesConfiguredValue(string? configured, string expected)
+    {
+        Assert.Equal(expected, SelfUpdateOptions.NormalizeMode(configured));
+    }
+
     [Fact]
     public void StartupCoordinator_InstallsEntrypointThenTransitionsPendingToAttempted()
     {

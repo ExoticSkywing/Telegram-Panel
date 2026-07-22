@@ -53,24 +53,34 @@ public sealed class AppSelfUpdateService
         var updateOptions = _updateOptions.CurrentValue;
         var selfUpdateOptions = _selfUpdateOptions.CurrentValue;
         var isDocker = IsRunningInDocker();
+        var updateMode = SelfUpdateOptions.NormalizeMode(selfUpdateOptions.Mode);
+
+        if (updateMode == SelfUpdateOptions.ImageMode)
+        {
+            return AppSelfUpdateInfo.Disabled(
+                currentVersion,
+                isDocker,
+                "当前为 Docker 镜像更新模式，请修改 TP_IMAGE 后执行 docker compose pull && docker compose up -d",
+                updateMode);
+        }
 
         if (!selfUpdateOptions.Enabled)
         {
-            return AppSelfUpdateInfo.Disabled(currentVersion, isDocker, "自动更新功能未启用");
+            return AppSelfUpdateInfo.Disabled(currentVersion, isDocker, "自动更新功能未启用", updateMode);
         }
 
         var repo = (updateOptions.Repository ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(repo) || !repo.Contains('/'))
         {
-            return AppSelfUpdateInfo.Failed(currentVersion, isDocker, "UpdateCheck:Repository 配置无效（应为 owner/repo）");
+            return AppSelfUpdateInfo.Failed(currentVersion, isDocker, "UpdateCheck:Repository 配置无效（应为 owner/repo）", updateMode);
         }
 
         if (!TryGetAssetKeyword(RuntimeInformation.ProcessArchitecture, out var assetKeyword, out var archLabel))
         {
-            return AppSelfUpdateInfo.Failed(currentVersion, isDocker, $"当前架构不支持自动更新：{RuntimeInformation.ProcessArchitecture}");
+            return AppSelfUpdateInfo.Failed(currentVersion, isDocker, $"当前架构不支持自动更新：{RuntimeInformation.ProcessArchitecture}", updateMode);
         }
 
-        var cacheKey = $"{CacheKeyPrefix}{repo}:{assetKeyword}";
+        var cacheKey = $"{CacheKeyPrefix}{repo}:{assetKeyword}:{updateMode}";
         if (!forceRefresh && _cache.TryGetValue(cacheKey, out var cachedObj) && cachedObj is AppSelfUpdateInfo cached)
             return cached;
 
@@ -114,6 +124,7 @@ public sealed class AppSelfUpdateService
                         PublishedAt = release.PublishedAt,
                         Notes = notes,
                         IsDocker = isDocker,
+                        UpdateMode = updateMode,
                         AssetName = matchedAsset?.Name,
                         AssetSizeBytes = matchedAsset?.Size,
                         AssetDownloadUrl = matchedAsset?.BrowserDownloadUrl,
@@ -127,7 +138,7 @@ public sealed class AppSelfUpdateService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Self update check failed");
-            result = AppSelfUpdateInfo.Failed(currentVersion, isDocker, ex.Message);
+            result = AppSelfUpdateInfo.Failed(currentVersion, isDocker, ex.Message, updateMode);
         }
 
         var cacheMinutes = updateOptions.CacheMinutes <= 0 ? 30 : updateOptions.CacheMinutes;
@@ -142,6 +153,10 @@ public sealed class AppSelfUpdateService
     public async Task<AppSelfUpdateApplyResult> ApplyLatestAsync(CancellationToken cancellationToken = default)
     {
         var options = _selfUpdateOptions.CurrentValue;
+        var updateMode = SelfUpdateOptions.NormalizeMode(options.Mode);
+        if (updateMode == SelfUpdateOptions.ImageMode)
+            return AppSelfUpdateApplyResult.Failed("当前为 Docker 镜像更新模式，请通过 TP_IMAGE 切换镜像并重建容器");
+
         if (!options.Enabled)
             return AppSelfUpdateApplyResult.Failed("自动更新功能未启用");
 
@@ -806,6 +821,7 @@ public sealed class AppSelfUpdateInfo
     public DateTimeOffset CheckedAtUtc { get; init; } = DateTimeOffset.UtcNow;
 
     public bool IsDocker { get; init; }
+    public string UpdateMode { get; init; } = SelfUpdateOptions.AutoMode;
     public bool CanApply { get; init; }
     public string? BlockedReason { get; init; }
 
@@ -813,25 +829,27 @@ public sealed class AppSelfUpdateInfo
     public long? AssetSizeBytes { get; init; }
     public string? AssetDownloadUrl { get; init; }
 
-    public static AppSelfUpdateInfo Disabled(string currentVersion, bool isDocker, string? reason = null) => new()
+    public static AppSelfUpdateInfo Disabled(string currentVersion, bool isDocker, string? reason = null, string? updateMode = null) => new()
     {
         Success = true,
         Enabled = false,
         CurrentVersion = currentVersion,
         IsDocker = isDocker,
+        UpdateMode = SelfUpdateOptions.NormalizeMode(updateMode),
         UpdateAvailable = false,
         CanApply = false,
         BlockedReason = reason,
         CheckedAtUtc = DateTimeOffset.UtcNow
     };
 
-    public static AppSelfUpdateInfo Failed(string currentVersion, bool isDocker, string error) => new()
+    public static AppSelfUpdateInfo Failed(string currentVersion, bool isDocker, string error, string? updateMode = null) => new()
     {
         Success = false,
         Enabled = true,
         Error = error,
         CurrentVersion = currentVersion,
         IsDocker = isDocker,
+        UpdateMode = SelfUpdateOptions.NormalizeMode(updateMode),
         UpdateAvailable = false,
         CanApply = false,
         CheckedAtUtc = DateTimeOffset.UtcNow

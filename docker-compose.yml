@@ -11,6 +11,9 @@ services:
     environment:
       ASPNETCORE_URLS: "http://+:5000"
       DOTNET_ENVIRONMENT: "Production"
+      # auto：按版本自动选择；image：只运行镜像；binary：优先运行 /data/app-current。
+      SelfUpdate__Mode: "${TP_UPDATE_MODE:-auto}"
+      TELEGRAM_PANEL_UPDATE_MODE: "${TP_UPDATE_MODE:-auto}"
 
       # SQLite 数据库（持久化到 ./docker-data）
       ConnectionStrings__DefaultConnection: "Data Source=/data/telegram-panel.db"

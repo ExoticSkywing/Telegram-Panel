@@ -2,6 +2,23 @@ namespace TelegramPanel.Web.Services;
 
 public sealed class SelfUpdateOptions
 {
+    public const string AutoMode = "auto";
+    public const string ImageMode = "image";
+    public const string BinaryMode = "binary";
+
+    /// <summary>
+    /// 更新策略：auto、image 或 binary。
+    /// </summary>
+    public string Mode { get; set; } = AutoMode;
+
+    public static string NormalizeMode(string? mode) =>
+        (mode ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            ImageMode => ImageMode,
+            BinaryMode => BinaryMode,
+            _ => AutoMode
+        };
+
     /// <summary>
     /// 是否启用应用内一键更新
     /// </summary>

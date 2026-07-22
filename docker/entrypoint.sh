@@ -17,6 +17,11 @@ UPDATE_ATTEMPTED_MARKER="$UPDATED_APP_DIR/.telegram-panel-update-attempted"
 UPDATE_CONFIRMED_MARKER="$UPDATED_APP_DIR/.telegram-panel-update-confirmed"
 IMAGE_VERSION_FILE="$DEFAULT_APP_DIR/version.txt"
 UPDATED_VERSION_FILE="$UPDATED_APP_DIR/version.txt"
+UPDATE_MODE="$(printf '%s' "${TELEGRAM_PANEL_UPDATE_MODE:-auto}" | tr '[:upper:]' '[:lower:]')"
+case "$UPDATE_MODE" in
+  image|binary|auto) ;;
+  *) UPDATE_MODE=auto ;;
+esac
 
 log() {
   printf '[telegram-panel-entrypoint] %s\n' "$*" >&2
@@ -70,10 +75,16 @@ fi
 
 APP_DIR="$DEFAULT_APP_DIR"
 if [ -f "$UPDATED_APP_DIR/$APP_ENTRY" ]; then
-  if [ -f "$UPDATE_CONFIRMED_MARKER" ]; then
+  if [ "$UPDATE_MODE" = "image" ]; then
+    APP_DIR="$DEFAULT_APP_DIR"
+    log "当前为 image 更新模式，使用镜像目录：$DEFAULT_APP_DIR"
+  elif [ -f "$UPDATE_CONFIRMED_MARKER" ]; then
     IMAGE_VERSION="$(read_version_file "$IMAGE_VERSION_FILE")"
     UPDATED_VERSION="$(read_version_file "$UPDATED_VERSION_FILE")"
-    if [ -n "$IMAGE_VERSION" ] && [ -n "$UPDATED_VERSION" ] \
+    if [ "$UPDATE_MODE" = "binary" ]; then
+      APP_DIR="$UPDATED_APP_DIR"
+      log "当前为 binary 更新模式，使用持久化目录：$UPDATED_APP_DIR"
+    elif [ -n "$IMAGE_VERSION" ] && [ -n "$UPDATED_VERSION" ] \
       && version_is_greater "$IMAGE_VERSION" "$UPDATED_VERSION"; then
       OBSOLETE_APP_DIR="$DATA_DIR/app-obsolete-$(date +%Y%m%d%H%M%S)-$$"
       if mv "$UPDATED_APP_DIR" "$OBSOLETE_APP_DIR"; then
