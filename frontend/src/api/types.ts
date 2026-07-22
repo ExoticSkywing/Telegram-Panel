@@ -158,6 +158,8 @@ export interface CreateWarpProxyRequest {
 
 export type AccountProxyStrategy = 'direct' | 'global' | 'existing' | 'warp_per_account'
 
+export type ZipImportProxyStrategy = AccountProxyStrategy | 'proxy_per_account'
+
 export interface AccountProxyBindingRequest {
   strategy: AccountProxyStrategy
   proxyId?: number | null
@@ -516,6 +518,11 @@ export interface ImportResult {
   username?: string | null
   sessionPath?: string | null
   error?: string | null
+  sourceKey?: string | null
+  proxyLine?: number | null
+  proxyId?: number | null
+  proxyName?: string | null
+  proxyEgressIp?: string | null
 }
 
 export interface ImportAccountsResponse {

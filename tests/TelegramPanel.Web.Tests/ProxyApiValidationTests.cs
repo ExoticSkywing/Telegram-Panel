@@ -85,6 +85,14 @@ public sealed class ProxyApiValidationTests
         Assert.Null(PanelAdminApiEndpoints.ParseImportProxyBinding(strategy, "1"));
     }
 
+    [Theory]
+    [InlineData("proxy_per_account")]
+    [InlineData(" PROXY_PER_ACCOUNT ")]
+    public void 逐账号批量代理不能被非Zip导入入口解析(string strategy)
+    {
+        Assert.Null(PanelAdminApiEndpoints.ParseImportProxyBinding(strategy, "1"));
+    }
+
     private static async Task AssertBatchMutationsBlockedAsync(WarpProxyFixture fixture)
     {
         var expected = await fixture.ReadSnapshotAsync();
