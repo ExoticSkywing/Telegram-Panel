@@ -1,100 +1,96 @@
 ---
 name: tgpanel-module-workflow
-description: 在 Telegram-Panel 或 Telegram-Panel-PrivateModules 代码库中，流程化创建、改造与排错模块（任务/API/Vue UI）并执行轻量化打包。用户提到“写模块”“扩展任务中心”“扩展 API 管理”“扩展模块页面”“Vue 模块页面”“manifest.json”“package-module.ps1”“轻量化 .tpm”“Slim/SlimHost/Full”时使用。
+description: 在 Telegram-Panel 或 Telegram-Panel-PrivateModules 中创建、修改、排错、打包和部署模块，覆盖宿主 ABI 锁定、任务/API、Vue iframe 页面、后台运行态、轻量 TPM 校验及生产烟雾测试。用户提到写模块、模块白屏/500、宿主版本不兼容、manifest、HostedService、模块页面、package-module.ps1、Slim/SlimHost/Full、TPM 构建或模块部署验收时使用。
 ---
 
 # TGPanel Module Workflow
 
-## 目标
+## 不可跳过的门禁
 
-- 先对齐宿主模块规范，再实现代码，避免运行时加载失败。
-- 新模块默认使用 Vue/静态页或宿主 Vue 原生页，不再默认创建 Razor/Blazor 页面。
-- 默认产出轻量化 `.tpm`，仅在兼容性需要时切换 Full 包。
-- 保留可复现命令、关键校验结果、风险说明。
+1. 先锁定目标生产宿主的版本和准确 tag/commit，再编译模块。
+2. 默认只引用 `TelegramPanel.Modules.Abstractions`；直接引用 `Core/Data/Web` 时，提高 `host.min` 并在目标宿主实测。
+3. 默认使用宿主 Vue 原生页或模块自带静态 Vue 页；默认在当前后台 iframe 内嵌，不直接跳独立页面。
+4. 默认生成轻量 TPM，禁止携带宿主共享边界程序集。
+5. 模块代码、配置、页面或资源有改动时，递增版本并为每个改动模块重新打包。
+6. 不以“编译成功”“HTTP 200”或“最近轮询变化”作为完成；所有模块完成源码、包和宿主验收，页面模块追加浏览器验收，后台模块追加真实业务验收。
 
-## 流程决策
+## 工作流
 
-1. 判断任务类型。
-   - 新增模块：执行“步骤 1 -> 步骤 2 -> 步骤 3 -> 步骤 4”。
-   - 修改已有模块：执行“步骤 1 -> 步骤 2（仅改动范围）-> 步骤 3 -> 步骤 4”。
-   - 仅打包：执行“步骤 1（最小检查）-> 步骤 3 -> 步骤 4”。
-2. 优先使用仓库现有脚本与文档，不重复造轮子。
-3. 只在必须时读取额外文件，控制上下文体积。
+### 1. 收集并锁定上下文
 
-## 步骤 1：收集上下文
+1. 检查工作树，保留用户已有修改。
+2. 将 `$SkillRoot` 设为当前已加载 `SKILL.md` 所在目录的绝对路径；后续脚本始终从该目录调用，不假定目标仓库含有 `skills/`。
+3. 用 `rg --files` 定位模块根目录的 `manifest.json` 与唯一 `*.csproj`。
+4. 依次查找并读取首个存在的模块文档：当前仓库 `docs/developer/modules.md`、`docs/modules.md`、`upstream/Telegram-Panel/docs/developer/modules.md`；同时读取 `tools/package-module.ps1` 和目标宿主的 `ModuleLoadContext.cs`。
+5. 记录生产宿主版本、Git SHA 和模块仓库 `upstream/Telegram-Panel` 的 SHA；两者必须对应。
+6. 读取 [宿主 ABI 规则](references/host-abi-compatibility.md)，运行宿主兼容校验。
 
-1. 优先读取以下文件。
-   - `docs/developer/modules.md`
-   - `upstream/Telegram-Panel/docs/developer/modules.md`
-   - `tools/package-module.ps1`
-2. 定位目标模块。
-   - 使用 `rg --files` 查找 `manifest.json` 与 `*.csproj`。
-   - 确认模块根目录直接包含 `manifest.json + *.csproj`。
-3. 对齐宿主加载边界。
-   - 读取 `upstream/Telegram-Panel/src/TelegramPanel.Web/Modules/ModuleLoadContext.cs`。
-   - 记录宿主共享程序集规则，作为轻量化剔除依据。
+### 2. 实现模块
 
-## 步骤 2：实现模块
+1. 新模块以 `assets/module-template/` 为起点，只生成 `Module.cs`、`Module.csproj`、`manifest.json` 与 `wwwroot/**`，使用普通 `Microsoft.NET.Sdk` 和本地静态 Vue 资源；`*.razor.tpl` 仅供明确维护旧兼容页时使用。
+2. 原子更新 JSON manifest、代码 Manifest、CI 包名、测试断言和 `host.min`。
+3. 按需实现 `ITelegramPanelModule`、任务/API/UI 扩展接口。
+4. 管理 API 放在 `/api/panel/extensions/{module-slug}`，首屏优先提供一个聚合 `GET ""`。
+5. 显式选择 `AllowAnonymous()` 或 `RequireAuthorization()`，不得把管理接口误设为公开接口。
+6. 涉及页面时读取 [内嵌页面合同](references/embedded-page-contract.md)。
+7. 涉及 `HostedService`、采集、监听、同步或通知时读取 [后台可观测性规范](references/runtime-observability.md)。
 
-1. 以 `assets/module-template/` 为起点创建或修复模块骨架；模板默认是普通 `Microsoft.NET.Sdk` + `wwwroot/settings.html` 静态 Vue 页。
-2. 保证 `manifest.json` 与代码一致。
-   - `entry.assembly` 必须等于实际入口 DLL。
-   - `entry.type` 必须等于入口类型全名。
-   - `id` 保持稳定，`version` 按语义化版本递增。
-3. 入口类实现 `ITelegramPanelModule`，并按需实现扩展接口。
-   - 任务扩展：`IModuleTaskProvider` / `IModuleTaskHandler`
-   - API 扩展：`IModuleApiProvider`
-   - UI 扩展：`IModuleUiProvider`
-4. 模块通过账号调用 Telegram 时，复用宿主账号服务并传入 `accountId`。
-   - 账号绑定的 HTTP、SOCKS5、MTProxy、WARP、Resin 或全局代理由宿主客户端池自动应用。
-   - 不在模块中重复提供代理选择或保存代理凭据，不自行创建 `WTelegram.Client`，不使用 `AccountProxyResolution` 覆盖宿主路由。
-   - 不长期缓存客户端实例；代理切换后应让宿主服务按账号重新获取客户端。
-5. 新模块页面默认二选一。
-   - 宿主 Vue 原生页：页面写在宿主 `frontend/src/views/extensions/`，模块只提供 `/api/panel/extensions/{module-slug}` 管理接口。
-   - 模块自带静态 Vue 页：模块在 `wwwroot/` 放 `settings.html` 与 JS/CSS，自己映射 `/ext/{moduleId}/settings` 与 `/ext/{moduleId}/assets/{file}`；`GetPages()` 返回空。
-6. 管理接口默认放在 `/api/panel/extensions/{module-slug}`，优先提供一个聚合 `GET ""`，减少页面首次加载请求数。
-7. 只有旧模块、临时过渡页面，或确实需要复用 Blazor 组件时，才使用 Razor 兼容页；此时页面组件必须声明 `ModuleId` 与 `PageKey` 参数。
-8. 外部任务的自定义创建页使用 `ModuleTaskDefinition.CreateRoute`；当前 Vue 后台不消费 `EditorComponentType` / `EditComponentType`，不要把旧 Razor 编辑器作为主要入口。
-9. 若能力属于常驻监听或后台服务，优先 `HostedService`，不要误塞到批量任务队列。
-10. 若新增 API 端点，显式选择鉴权策略（`AllowAnonymous` 或 `RequireAuthorization`）。
+### 3. 编译前校验
 
-## 步骤 3：编译与轻量化打包
-
-1. 在仓库根目录执行打包。
-1.1 只要本次任务改动了任一模块相关文件（例如 `manifest.json`、`*.csproj`、`*.cs`、`wwwroot/**`、`*.html`、`*.js`、`*.css`，以及旧模块的 `*.razor`），必须在交付前默认执行一次 `.tpm` 打包，不等待用户再次要求“编译”。
-1.2 若一次任务改动多个模块，则每个被改动模块都要分别打包并产出对应 `.tpm`。
-2. 优先运行本技能脚本（自动补全 `Project/Manifest`）：
+在仓库根目录运行：
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File "skills/tgpanel-module-workflow/scripts/package-module-lite.ps1" -ModuleDir "模块源码/你的模块目录"
+& (Join-Path $SkillRoot "scripts/verify-module-host-compat.ps1") `
+  -ModuleDir "模块源码/你的模块目录" `
+  -HostRepo "upstream/Telegram-Panel" `
+  -ExpectedHostRef "v<生产宿主版本>"
 ```
 
-3. 直接调用仓库脚本也可：
+修复所有错误。警告涉及 `Core/Data/Web`、宿主 SHA 或 `host.min` 时，不得忽略，必须补充目标宿主参数或运行验证证据。
+
+### 4. 打包
+
+只要改动任一模块相关文件，就为每个改动模块运行：
+
+```powershell
+& (Join-Path $SkillRoot "scripts/package-module-lite.ps1") -ModuleDir "模块源码/你的模块目录"
+```
+
+仅在包装脚本不可用时直接调用仓库脚本：
 
 ```powershell
 powershell tools/package-module.ps1 -Project "<模块.csproj相对路径>" -Manifest "<manifest.json相对路径>"
 ```
 
-4. 轻量化策略。
-   - 默认不要加 `-Full`。
-   - 仅在目标宿主不保证内置依赖一致时，才考虑 `-Full`。
-   - 优先遵循仓库脚本默认行为（通常已偏向轻量化）。
+默认不要使用 `-Full`。选择 Slim/SlimHost/Full 前读取 [轻量打包规则](references/lightweight-packaging.md)。
 
-## 步骤 4：校验产物
+### 5. 校验 TPM
 
-1. 确认产物存在：`artifacts/modules/<moduleId>-<version>.tpm`。
-2. 解包检查结构。
-   - 根目录必须有 `manifest.json`
-   - 必须有 `lib/<entry assembly>.dll`
-3. 抽样检查轻量化结果。
-   - 重点确认未误删入口程序集。
-   - 重点确认宿主共享程序集未被重复打包（或数量可接受）。
+包装脚本应自动执行包校验；仍要确认产物位于 `artifacts/modules/<moduleId>-<version>.tpm`。单独复核时运行：
 
-## 步骤 5：交付说明
+```powershell
+& (Join-Path $SkillRoot "scripts/verify-module-package.ps1") -TpmPath "artifacts/modules/<moduleId>-<version>.tpm" -ModuleDir "模块源码/你的模块目录"
+```
 
-1. 列出改动文件与核心行为变化。
-2. 列出执行命令与关键输出路径。
-3. 说明未完成项、风险点、后续建议。
+至少检查根 manifest、入口 DLL、静态资源、版本一致性、UTF-8 编码和宿主共享 DLL。
+
+### 6. 运行时与生产验收
+
+读取 [生产验收与回滚](references/production-verification.md)，完成安装、启用、宿主重启和版本复核；页面模块追加 HTTP 与浏览器真渲染，API 模块追加接口契约，后台模块追加真实业务一轮。
+
+HTTP 烟雾测试示例：
+
+```powershell
+& (Join-Path $SkillRoot "scripts/smoke-test-module-page.ps1") -BaseUrl "http://127.0.0.1:5000" -ModuleId "pro.example" -PageKey "settings" -ApiPath "/api/panel/extensions/example"
+```
+
+页面模块必须提供 `-ApiPath` 或 `-ExpectedPageText` 证明返回的是目标模块。该脚本不替代浏览器检查；仍要从侧栏打开页面，确认 iframe 有内容、控制台无错误、Network 无失败资源或重定向循环。
+
+### 7. 交付
+
+1. 列出改动文件、行为变化和目标宿主版本/SHA。
+2. 列出校验命令、运行验收结果和每个 TPM 的绝对路径。
+3. 明确风险、未执行的生产步骤和回滚版本；不得把未验证项描述为已完成。
 
 ## 输出约束（TPM 构建请求）
 
@@ -109,25 +105,22 @@ powershell tools/package-module.ps1 -Project "<模块.csproj相对路径>" -Mani
 
 ## 常见故障处理
 
-1. `TypeLoadException` / 组件参数绑定异常。
-   - 先检查是否把 `Microsoft.Extensions.*`、`Microsoft.AspNetCore.*`、`TelegramPanel.*` 等边界程序集错误携带进模块包。
-2. Vue 模块页面 404/白屏。
-   - 先检查 `/ext/{moduleId}/settings` 是否由模块 endpoint 返回。
-   - 再检查 `/ext/{moduleId}/assets/{file}` 是否能返回 Vue/JS/CSS 静态资源。
-   - 如果 Vue 页面请求 `/api/panel/extensions/{module-slug}` 返回 404，说明模块管理端 API 没补齐或 slug 不一致。
-3. 旧 Razor 页面 500。
-   - 仅兼容模式下检查页面组件是否声明 `ModuleId` 与 `PageKey` 参数。
-4. 打包后体积异常大。
-   - 先检查是否误用 `-Full`。
-   - 再检查 `publish/` 历史产物是否被当作内容打进包内。
-5. 模块里的账号操作没有走已绑定代理。
-   - 检查是否绕过宿主服务自行创建了 `WTelegram.Client`。
-   - 检查是否错误使用 `AccountProxyResolution` 覆盖了账号路由。
-   - 检查是否长期缓存了代理切换前创建的客户端实例。
+- `MissingMethodException` / `TypeLoadException` / 500：先检查目标宿主 SHA、`host.min` 和共享 DLL，再查业务代码。
+- 页面 404/白屏：依次检查宿主 `/ui/ext/...`、iframe `/ext/...?legacy=1&embed=1`、静态资源和聚合 API。
+- 页面仍是旧版本：检查 manifest 版本、浏览器缓存、`ActiveVersion` 与 `LastGoodVersion`，确认是否已回滚。
+- 后台显示轮询但业务不变化：比较最近心跳、完整执行、业务变化、原始错误和上一轮汇总。
+- 包体积异常：检查 `-Full`、历史 `publish/` 目录和共享程序集。
 
 ## 资源索引
 
 - 规则清单：`references/module-development-checklist.md`
+- 宿主 ABI：`references/host-abi-compatibility.md`
+- 内嵌页面：`references/embedded-page-contract.md`
+- 后台可观测性：`references/runtime-observability.md`
+- 生产验收与回滚：`references/production-verification.md`
 - 轻量化打包：`references/lightweight-packaging.md`
 - 代码模板：`assets/module-template/`
 - 自动打包脚本：`scripts/package-module-lite.ps1`
+- 宿主兼容校验：`scripts/verify-module-host-compat.ps1`
+- TPM 内容校验：`scripts/verify-module-package.ps1`
+- 页面 HTTP 烟雾测试：`scripts/smoke-test-module-page.ps1`

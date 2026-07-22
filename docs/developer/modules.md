@@ -248,14 +248,14 @@ if (availableChannels.Count == 0)
 
 如果你的模块需要配置界面，优先使用模块自带静态 Vue 页，或在宿主仓库中提供 Vue 原生页。模块在 `MapEndpoints` 中提供管理端 API，页面负责展示和保存配置。
 
-对还没有 Vue 原生页面的旧模块，可以继续用 **Razor 模块页面**（`IModuleUiProvider.GetPages`）作为兼容配置入口，然后在 `ModuleTaskDefinition.CreateRoute` 中指向该页面的路由：
+对还没有 Vue 原生页面的旧模块，可以继续用 **Razor 模块页面**（`IModuleUiProvider.GetPages`）作为兼容配置入口。模块可以通过导航项或自己的页面入口指向该路由；不要仅为了打开独立配置页而注册一个可创建任务定义：
 
 - 模块页面路由固定为：`/ext/{ModuleId}/{PageKey}`
-- 当 `CreateRoute` 指向 `/ext/...` 时，“新建任务”弹窗会提供“打开窗口/前往页面”两种方式。
+- `ModuleTaskDefinition.CreateRoute` 仅表示已有任务的独立编辑入口；仅有该字段的任务不会出现在“新建任务”弹窗。
 
-`CreateRoute` 只负责打开创建或配置入口，不会替代任务中心的“编辑任务”逻辑。当前 Vue 任务中心编辑外部任务时使用通用 JSON 表单；只有宿主已经内置 Vue 编辑器的任务类型才会显示专用表单。
+`CreateRoute` 用于已有任务的配置和编辑入口。任务中心编辑外部任务时会把 `taskId` 附加到该路由；页面必须按任务 ID 读取和保存配置。只有 `canCreate=true` 且有专用表单的任务类型才会显示在新建任务列表。
 
-`EditorComponentType` 与 `TaskCenter.EditComponentType` 是旧 Razor 后台的兼容字段。当前 Vue 管理 API 不会把这两个 .NET 组件类型下发给浏览器，新外部模块不要把它们作为主要编辑入口。
+`EditorComponentType` 是宿主内置任务创建/编辑器的合同；`TaskCenter.EditComponentType` 仍用于旧 Razor 编辑入口。外部模块不要仅依赖 .NET 组件类型向 Vue 浏览器扩展页面。
 
 > 提醒：保存配置应尽量做到“立即生效”；只有模块启用/停用（影响 DI/后台服务装载）才需要重启。
 
@@ -780,7 +780,17 @@ public IEnumerable<ModuleNavItem> GetNavItems(ModuleHostContext context)
 
 ## 任务扩展（Task）
 
-### 1) 声明任务类型（可在“新建任务”中出现）
+### 任务中心创建与编辑合同
+
+任务定义本身可以继续用于历史任务展示、状态能力和重跑能力，但“新建任务”只展示宿主明确允许创建的定义。当前宿主会把 `canCreate` 下发给 Vue 管理端；没有 `CreateRoute` 且存在宿主验证通过的 `EditorComponentType` 的定义才会进入任务创建列表，内置模块和外部模块都适用。
+
+仅有 `CreateRoute` 的常驻监听或配置模块不会出现在“新建任务”弹窗中。已有任务仍可在任务中心编辑；当没有宿主编辑器但定义声明了 `CreateRoute` 时，宿主会把 `taskId` 附加到该路由后打开模块页面。模块页面必须接受该参数，并按任务 ID 读取和保存对应配置。
+
+模块开发必须验证：无效编辑器类型不会进入创建列表，路由-only 任务仍能在任务中心打开，创建列表不包含系统任务，且 `canCreate` 与实际页面能力一致。
+
+Vue SPA 还会额外要求任务类型存在宿主内置的 `TaskConfigForm`；外部模块应使用 `CreateRoute` 提供自己的页面，不要假设 .NET 编辑器类型会自动下发到浏览器。
+
+### 1) 声明任务类型与创建编辑器
 
 实现 `IModuleTaskProvider` 返回 `ModuleTaskDefinition`：
 
@@ -911,7 +921,7 @@ yield return new ModuleTaskDefinition
 };
 ```
 
-用户在“新建任务”中选择该任务类型后，可以在窗口中打开该页面或前往页面。页面通过模块的管理接口读取选项，并在校验后调用宿主任务接口创建任务。
+该页面用于已有任务的配置和编辑。任务中心打开时会追加 `taskId`，页面通过模块管理接口读取对应任务，并在校验后保存配置。它不会因为声明了 `CreateRoute` 就自动出现在“新建任务”列表。
 
 实用建议（针对“多账号/多目标”类任务）：
 
@@ -920,7 +930,7 @@ yield return new ModuleTaskDefinition
 - 支持筛选：例如“账号分类筛选/搜索”，减少用户选择成本
 - 遵循宿主的账号排除规则：默认不展示 `Category.ExcludeFromOperations=true` 的账号（常用于“工作账号”）；如你的模块确实需要，也可以提供“包含工作账号”的开关
 
-如果不提供 `CreateRoute`，Vue 任务中心会使用通用的 `Total + Config JSON` 创建表单。`EditorComponentType` / `EditComponentType` 只保留给旧 Razor 兼容流程，不适合作为新外部模块的浏览器 UI 扩展方式。
+没有专用创建编辑器的任务不会被宿主标记为 `canCreate`，也不会出现在“新建任务”列表。`EditorComponentType` 仅用于宿主内置任务的合法创建/编辑器；`EditComponentType` 保留给旧 Razor 兼容流程。
 
 ### 4) 任务中心能力声明（建议按新约定填写）
 

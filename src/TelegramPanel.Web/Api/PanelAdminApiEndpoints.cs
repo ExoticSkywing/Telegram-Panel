@@ -4843,7 +4843,7 @@ public static class PanelAdminApiEndpoints
             .OrderBy(x => x.Definition.Category ?? "", StringComparer.OrdinalIgnoreCase)
             .ThenBy(x => x.Definition.Order)
             .ThenBy(x => x.Definition.DisplayName, StringComparer.OrdinalIgnoreCase)
-            .Select(x => ToDto(x.Definition))
+            .Select(ToDto)
             .ToList();
 
         return Results.Ok(new TaskCenterDto(taskList, scheduled, definitions, timeZone.Current.Id));
@@ -5628,19 +5628,20 @@ public static class PanelAdminApiEndpoints
             task.CreatedAt,
             task.UpdatedAt);
 
-    private static TaskDefinitionDto ToDto(ModuleTaskDefinition definition) =>
+    private static TaskDefinitionDto ToDto(RegisteredTaskDefinition registered) =>
         new(
-            definition.TaskType,
-            definition.DisplayName,
-            definition.Category,
-            definition.Description,
-            definition.Icon,
-            definition.CreateRoute,
-            definition.TaskCenter.CanPause,
-            definition.TaskCenter.CanResume,
-            definition.TaskCenter.CanEdit,
-            definition.TaskCenter.CanRerun,
-            definition.TaskCenter.AutoPauseBeforeEdit);
+            registered.Definition.TaskType,
+            registered.Definition.DisplayName,
+            registered.Definition.Category,
+            registered.Definition.Description,
+            registered.Definition.Icon,
+            registered.Definition.CreateRoute,
+            registered.CanCreate,
+            registered.Definition.TaskCenter.CanPause,
+            registered.Definition.TaskCenter.CanResume,
+            registered.Definition.TaskCenter.CanEdit,
+            registered.Definition.TaskCenter.CanRerun,
+            registered.Definition.TaskCenter.AutoPauseBeforeEdit);
 
     private static DataDictionaryDto ToDto(DataDictionary dictionary) =>
         new(
@@ -7571,6 +7572,7 @@ public sealed record TaskDefinitionDto(
     string? Description,
     string Icon,
     string? CreateRoute,
+    bool CanCreate,
     bool CanPause,
     bool CanResume,
     bool CanEdit,

@@ -1,4 +1,4 @@
-﻿@page "/tasks"
+@page "/tasks"
 @inject BatchTaskManagementService TaskManagement
 @inject ScheduledTaskService ScheduledTaskManagement
 @inject ImageAssetStorageService AssetStorage
@@ -7,6 +7,7 @@
 @inject PanelTimeZoneService TimeZone
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject NavigationManager Navigation
 @using TelegramPanel.Data.Entities
 @using TelegramPanel.Core.BatchTasks
 @using System.Text.Json
@@ -594,7 +595,6 @@
                 BatchTaskTypes.ChannelGroupPrivateCreate => BuildPrivateCreateConfigLines(root),
                 BatchTaskTypes.ChannelGroupPublicize => BuildPublicizeConfigLines(root),
                 BatchTaskTypes.AccountAutoSync => BuildAccountSyncConfigLines(root),
-                _ when string.Equals((taskType ?? string.Empty).Trim(), "user_message_report", StringComparison.OrdinalIgnoreCase) => BuildMessageReportConfigLines(root),
                 _ => BuildGenericConfigLines(root)
             };
 
@@ -643,20 +643,6 @@
             $"描述模板: {GetJsonString(root, "description_template", "-")}",
             $"公开用户名模板: {GetJsonString(root, "username_template", "-")}",
             $"头像来源: {GetAvatarSourceName(root)}"
-        };
-    }
-
-    private static List<string> BuildMessageReportConfigLines(JsonElement root)
-    {
-        return new List<string>
-        {
-            $"账号分类: {BuildSelectedCategorySummary(root)}",
-            $"举报目标数: {GetJsonArrayCount(root, "message_links")}",
-            $"间隔: {FormatDelaySeconds(GetJsonInt(root, "delay_min_ms", 0))} ~ {FormatDelaySeconds(GetJsonInt(root, "delay_max_ms", 0))} 秒",
-            $"最多举报: {FormatMaxReports(GetJsonInt(root, "max_reports", 0))}",
-            $"举报类型: {GetReportPresetName(GetJsonString(root, "report_preset", ""))}",
-            $"自定义关键词: {FormatStringArray(GetJsonStringArray(root, "option_keywords"))}",
-            $"举报文案: {GetJsonString(root, "comment", "-")}"
         };
     }
 
@@ -808,9 +794,6 @@
     private static string FormatSecondsValue(int seconds) =>
         seconds <= 0 ? "0" : seconds.ToString("0.###");
 
-    private static string FormatMaxReports(int maxReports) =>
-        maxReports <= 0 ? "不设上限" : maxReports.ToString();
-
     private static string GetObjectTypeName(string value) =>
         value switch
         {
@@ -867,22 +850,6 @@
 
     private static string FormatOptionalSuffix(string value) =>
         string.IsNullOrWhiteSpace(value) ? string.Empty : $"（{value}）";
-
-    private static string GetReportPresetName(string preset) =>
-        preset switch
-        {
-            "spam" => "垃圾 / 骚扰",
-            "violence" => "暴力 / 威胁",
-            "pornography" => "色情 / 淫秽",
-            "child_abuse" => "儿童虐待",
-            "copyright" => "版权侵权",
-            "illegal_drugs" => "违禁药物",
-            "personal_details" => "隐私 / 个人信息",
-            "other" => "其他",
-            "first_available" => "直接选第一个选项",
-            "custom" => "自定义关键词",
-            _ => string.IsNullOrWhiteSpace(preset) ? "-" : preset
-        };
 
     private static string GetSyncTriggerName(string trigger) =>
         trigger switch
@@ -953,11 +920,6 @@
             "verification_keywords" => "验证关键词",
             "verification_regexes" => "验证正则",
             "verification_bot_usernames" => "验证机器人",
-            "message_links" => "举报目标",
-            "max_reports" => "最多举报",
-            "report_preset" => "举报类型",
-            "option_keywords" => "自定义关键词",
-            "comment" => "举报文案",
             "trigger" => "触发方式",
             "scope" => "同步范围",
             "includes" => "包含内容",
@@ -1015,7 +977,9 @@
         if (!capabilities.CanEdit)
             return false;
 
-        if (ModuleTaskEditorComponentResolver.ResolveEditEditor(definition) == null)
+        var hasEditor = ModuleTaskEditorComponentResolver.ResolveEditEditor(definition) != null;
+        var hasStandaloneRoute = !string.IsNullOrWhiteSpace(definition.Definition.CreateRoute);
+        if (!hasEditor && !hasStandaloneRoute)
             return false;
 
         return !HasStatus(task, "running") || capabilities.AutoPauseBeforeEdit;
@@ -1606,6 +1570,22 @@
                 Snackbar.Add($"自动暂停失败：{ex.Message}", Severity.Error);
                 return;
             }
+        }
+
+        var standaloneRoute = (definition.Definition.CreateRoute ?? string.Empty).Trim();
+        if (ModuleTaskEditorComponentResolver.ResolveEditEditor(definition) == null
+            && standaloneRoute.Length > 0)
+        {
+            var separator = standaloneRoute.IndexOf('?') >= 0 ? '&' : '?';
+            var route = $"{standaloneRoute}{separator}taskId={task.Id}";
+            if (route.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase))
+            {
+                var legacySeparator = route.IndexOf('?') >= 0 ? '&' : '?';
+                route += $"{legacySeparator}legacy=1";
+            }
+
+            Navigation.NavigateTo(route, forceLoad: true);
+            return;
         }
 
         var parameters = new DialogParameters

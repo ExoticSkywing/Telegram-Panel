@@ -627,6 +627,7 @@ export interface TaskDefinition {
   description?: string | null
   icon: string
   createRoute?: string | null
+  canCreate: boolean
   canPause: boolean
   canResume: boolean
   canEdit: boolean

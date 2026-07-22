@@ -1,4 +1,4 @@
 interface:
   display_name: "TGPanel 模块工作流"
-  short_description: "流程化编写 TGPanel 模块，默认使用 Vue 静态页并执行轻量化打包"
-  default_prompt: "按照 TGPanel 规范创建或修改模块，默认使用 Vue/静态页补齐管理端 API、manifest 与入口实现，并优先产出轻量化 .tpm 包。"
+  short_description: "锁定宿主 ABI，开发、打包并验收 TGPanel 模块"
+  default_prompt: "使用 $tgpanel-module-workflow 创建或修复模块，并完成宿主兼容、轻量 TPM 和运行时验收。"

@@ -496,12 +496,18 @@ const availableCategories = computed(() => {
   return Array.from(set).sort()
 })
 
-const creatableCategories = computed(() => availableCategories.value.filter((x) => x !== 'system'))
+const taskCenterCreateDefinitions = computed(() =>
+  definitions.value.filter((x) => x.canCreate && hasTaskConfigForm(x.taskType) && x.category !== 'system'),
+)
+
+const creatableCategories = computed(() => {
+  const set = new Set(taskCenterCreateDefinitions.value.map((x) => (x.category || '').trim()).filter(Boolean))
+  return Array.from(set).sort()
+})
 
 const creatableDefinitions = computed(() =>
-  definitions.value
+  taskCenterCreateDefinitions.value
     .filter((x) => x.category === createDialog.value.form.category)
-    .filter((x) => x.category !== 'system')
     .sort((a, b) => a.displayName.localeCompare(b.displayName, 'zh-Hans-CN')),
 )
 
@@ -846,6 +852,17 @@ async function openEditTask(task: BatchTask) {
     await ElMessageBox.confirm(`任务 #${task.id} 正在执行，将先自动暂停再打开编辑窗口。是否继续？`, '确认编辑', { type: 'warning' })
     await panelApi.pauseTask(task.id)
     await load()
+  }
+  const editRoute = resolveCreateTarget(def)
+  if (editRoute && !hasTaskConfigForm(def.taskType)) {
+    const separator = editRoute.includes('?') ? '&' : '?'
+    const routeWithTaskId = `${editRoute}${separator}taskId=${encodeURIComponent(String(task.id))}`
+    if (isModuleEndpointRoute(routeWithTaskId)) {
+      window.location.href = withModulePageMode(routeWithTaskId, false)
+    } else {
+      await router.push(routeWithTaskId)
+    }
+    return
   }
   const fullTask = await loadTaskDetail(task.id)
   editDraft.value = emptyDraft()

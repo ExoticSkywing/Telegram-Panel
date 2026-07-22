@@ -4,7 +4,6 @@
 @inject TelegramPanel.Web.Modules.ModuleContributionRegistry Contributions
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
-@inject NavigationManager Navigation
 @inject PanelTimeZoneService TimeZone
 @using System.Text.Json
 @using Microsoft.AspNetCore.Components
@@ -78,21 +77,7 @@
                 </MudStack>
             }
 
-            @if (CurrentOption != null && !string.IsNullOrWhiteSpace(CurrentOption.CreateRoute))
-            {
-                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true">
-                    该任务建议使用配置窗口创建/编辑：<b>@CurrentOption.CreateRoute</b>
-                </MudAlert>
-                <MudStack Row="true" Spacing="2">
-                    <MudButton Variant="Variant.Filled" Color="Color.Primary" OnClick="@(() => OpenCreateDialog(CurrentOption.CreateRoute!))">
-                        打开窗口
-                    </MudButton>
-                    <MudButton Variant="Variant.Outlined" Color="Color.Default" OnClick="@(() => NavigateTo(CurrentOption.CreateRoute!))">
-                        前往页面
-                    </MudButton>
-                </MudStack>
-            }
-            else if (CurrentOption != null && !string.IsNullOrWhiteSpace(CurrentOption.EditorComponentType) && editorComponentType != null)
+            @if (CurrentOption != null && editorComponentType != null)
             {
                 <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true">
                     该任务由模块提供自定义配置表单。
@@ -107,23 +92,9 @@
             }
             else
             {
-                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true">
-                    该任务类型暂无专用创建表单。你可以填写通用配置（JSON 字符串）提交任务；对应模块需要在后台实现该 TaskType 的执行器。
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true">
+                    当前没有可用的任务创建编辑器，请从对应功能页面创建。
                 </MudAlert>
-
-                <MudTextField @bind-Value="genericConfigJson"
-                              Label="任务配置（JSON）"
-                              Variant="Variant.Outlined"
-                              Lines="8"
-                              HelperText="模块可自行解析该 JSON。若无需配置可留空。" />
-
-                <MudNumericField T="int"
-                                 @bind-Value="genericTotal"
-                                 Label="总数（Total，可选）"
-                                 Variant="Variant.Outlined"
-                                 Min="0"
-                                 Max="1000000"
-                                 HelperText="用于进度条展示；若不确定可填 0，由执行器在运行时持续更新进度。" />
             }
         </MudStack>
     </DialogContent>
@@ -203,8 +174,6 @@
     private string scheduledTaskName = string.Empty;
     private string cronExpression = "0 9 * * *";
     private bool creating;
-    private string genericConfigJson = string.Empty;
-    private int genericTotal;
     private ModuleTaskDraft editorDraft = new(0, null, false, null);
     private Type? editorComponentType;
     private Dictionary<string, object?> editorParameters = new();
@@ -212,7 +181,7 @@
     private bool IsScheduledMode => string.Equals(submissionMode, SubmissionModes.Scheduled, StringComparison.OrdinalIgnoreCase);
 
     private IEnumerable<string> AvailableCategories =>
-        Contributions.Tasks
+        Contributions.CreatableTasks
             .Select(x => (x.Definition.Category ?? string.Empty).Trim())
             .Where(x => x.Length > 0)
             .Where(x => !IsSystemCategory(x))
@@ -220,7 +189,7 @@
             .OrderBy(x => x, StringComparer.OrdinalIgnoreCase);
 
     private IEnumerable<ModuleTaskDefinition> AvailableOptions =>
-        Contributions.Tasks
+        Contributions.CreatableTasks
             .Select(x => x.Definition)
             .Where(o => !IsSystemCategory(o.Category))
             .Where(o => string.Equals(o.Category, selectedCategory, StringComparison.OrdinalIgnoreCase))
@@ -229,8 +198,8 @@
 
     private ModuleTaskDefinition? CurrentOption =>
         !string.IsNullOrWhiteSpace(selectedTaskType)
-        && Contributions.TaskTypeToDefinition.TryGetValue(selectedTaskType, out var reg)
-            ? reg.Definition
+        ? Contributions.CreatableTasks
+            .FirstOrDefault(x => string.Equals(x.Definition.TaskType, selectedTaskType, StringComparison.OrdinalIgnoreCase))?.Definition
             : null;
 
     protected override Task OnInitializedAsync()
@@ -247,7 +216,7 @@
         if (AvailableOptions.All(o => !string.Equals(o.TaskType, selectedTaskType, StringComparison.OrdinalIgnoreCase)))
         {
             selectedTaskType = AvailableOptions.FirstOrDefault()?.TaskType
-                ?? Contributions.Tasks.FirstOrDefault(x => !IsSystemCategory(x.Definition.Category))?.Definition.TaskType
+                ?? Contributions.CreatableTasks.FirstOrDefault(x => !IsSystemCategory(x.Definition.Category))?.Definition.TaskType
                 ?? string.Empty;
         }
     }
@@ -273,7 +242,9 @@
         if (option == null || string.IsNullOrWhiteSpace(option.EditorComponentType))
             return;
 
-        if (!Contributions.TaskTypeToDefinition.TryGetValue(option.TaskType, out var reg))
+        var reg = Contributions.CreatableTasks
+            .FirstOrDefault(x => string.Equals(x.Definition.TaskType, option.TaskType, StringComparison.OrdinalIgnoreCase));
+        if (reg == null)
             return;
 
         editorComponentType = ModuleTaskEditorComponentResolver.ResolveCreateEditor(reg);
@@ -301,12 +272,6 @@
     {
         if (creating)
             return;
-
-        if (CurrentOption != null && !string.IsNullOrWhiteSpace(CurrentOption.CreateRoute))
-        {
-            Snackbar.Add("该任务建议使用独立页面创建，请点击“前往创建”。", Severity.Info);
-            return;
-        }
 
         string? config;
         int total;
@@ -408,58 +373,7 @@
             return (editorConfig, Math.Max(0, editorDraft.Total));
         }
 
-        var genericConfig = string.IsNullOrWhiteSpace(genericConfigJson) ? null : genericConfigJson.Trim();
-        if (!string.IsNullOrWhiteSpace(genericConfig))
-            JsonDocument.Parse(genericConfig);
-
-        return (genericConfig, Math.Max(0, genericTotal));
-    }
-
-    private void NavigateTo(string url)
-    {
-        MudDialog.Close();
-        Navigation.NavigateTo(url);
-    }
-
-    private async Task OpenCreateDialog(string route)
-    {
-        route = (route ?? string.Empty).Trim();
-        if (route.Length == 0)
-            return;
-
-        if (!TryParseExtRoute(route, out var moduleId, out var pageKey))
-        {
-            Snackbar.Add("该任务未提供可窗口打开的模块页面，请使用“前往页面”。", Severity.Info);
-            return;
-        }
-
-        var options = new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.ExtraLarge, FullWidth = true };
-        var parameters = new DialogParameters
-        {
-            ["ModuleId"] = moduleId,
-            ["PageKey"] = pageKey
-        };
-
-        DialogService.Show<TelegramPanel.Web.Components.Dialogs.ModulePageDialog>("任务配置", parameters, options);
-        await Task.CompletedTask;
-    }
-
-    private static bool TryParseExtRoute(string route, out string moduleId, out string pageKey)
-    {
-        moduleId = string.Empty;
-        pageKey = string.Empty;
-
-        route = (route ?? string.Empty).Trim();
-        if (!route.StartsWith("/ext/", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        var parts = route.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (parts.Length < 3 || !string.Equals(parts[0], "ext", StringComparison.OrdinalIgnoreCase))
-            return false;
-
-        moduleId = parts[1];
-        pageKey = parts[2];
-        return moduleId.Length > 0 && pageKey.Length > 0;
+        throw new InvalidOperationException("当前任务没有可用的创建编辑器");
     }
 
     private void Cancel() => MudDialog.Close();

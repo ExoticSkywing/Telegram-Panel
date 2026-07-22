@@ -46,3 +46,4 @@ nav:
   - 开发:
       - 模块开发: developer/modules.md
       - 文档维护: developer/documentation.md
+      - 开发发布流程: developer/release-process.md

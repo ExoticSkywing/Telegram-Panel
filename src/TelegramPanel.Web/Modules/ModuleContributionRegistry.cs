@@ -19,7 +19,13 @@ public sealed class ModuleContributionRegistry
             {
                 foreach (var t in taskProvider.GetTasks(m.Context) ?? Array.Empty<ModuleTaskDefinition>())
                 {
-                    tasks.Add(new RegisteredTaskDefinition(m, NormalizeTask(t)));
+                    var normalized = NormalizeTask(t);
+                    var registered = new RegisteredTaskDefinition(m, normalized);
+                    tasks.Add(registered with
+                    {
+                        CanCreate = string.IsNullOrWhiteSpace(normalized.CreateRoute)
+                            && TelegramPanel.Web.Services.ModuleTaskEditorComponentResolver.ResolveCreateEditor(registered) != null
+                    });
                 }
             }
 
@@ -45,6 +51,7 @@ public sealed class ModuleContributionRegistry
         }
 
         Tasks = tasks;
+        CreatableTasks = tasks.Where(x => x.CanCreate).ToList();
         ApiTypes = apis;
         Pages = pages;
         NavItems = navs;
@@ -56,6 +63,7 @@ public sealed class ModuleContributionRegistry
     }
 
     public IReadOnlyList<RegisteredTaskDefinition> Tasks { get; }
+    public IReadOnlyList<RegisteredTaskDefinition> CreatableTasks { get; }
     public IReadOnlyList<RegisteredApiTypeDefinition> ApiTypes { get; }
     public IReadOnlyList<RegisteredPageDefinition> Pages { get; }
     public IReadOnlyList<RegisteredNavItem> NavItems { get; }
@@ -187,7 +195,10 @@ public sealed class ModuleContributionRegistry
     }
 }
 
-public sealed record RegisteredTaskDefinition(LoadedModule Module, ModuleTaskDefinition Definition);
+public sealed record RegisteredTaskDefinition(LoadedModule Module, ModuleTaskDefinition Definition)
+{
+    public bool CanCreate { get; init; }
+}
 public sealed record RegisteredApiTypeDefinition(LoadedModule Module, ModuleApiTypeDefinition Definition);
 public sealed record RegisteredPageDefinition(LoadedModule Module, ModulePageDefinition Definition);
 public sealed record RegisteredNavItem(LoadedModule Module, ModuleNavItem Definition);

@@ -33,8 +33,10 @@ public sealed class {{MODULE_CLASS}} : ITelegramPanelModule, IModuleUiProvider
             .GetRequiredService<IConfiguration>()
             .GetValue("AdminAuth:Enabled", true);
 
-        var page = endpoints.MapGet("/ext/{{MODULE_ID}}/settings", GetSettingsPageAsync);
-        var assets = endpoints.MapGet("/ext/{{MODULE_ID}}/assets/{file}", GetAssetAsync);
+        var page = endpoints.MapGet(
+            "/ext/{{MODULE_ID}}/settings",
+            (Func<HttpContext, Task<IResult>>)GetSettingsPageAsync);
+        var assets = endpoints.MapGet("/ext/{{MODULE_ID}}/assets/{**file}", GetAssetAsync);
         var api = endpoints.MapGroup("/api/panel/extensions/{{MODULE_API_SLUG}}");
 
         if (authEnabled)
@@ -68,23 +70,23 @@ public sealed class {{MODULE_CLASS}} : ITelegramPanelModule, IModuleUiProvider
         if (!File.Exists(path))
             return Results.NotFound();
 
+        // HTML 不做强缓存，避免模块升级后 iframe 继续展示旧页面。
+        http.Response.Headers.CacheControl = "no-store, no-cache";
         var html = await File.ReadAllTextAsync(path, http.RequestAborted);
         return Results.Content(html, "text/html; charset=utf-8");
     }
 
     private static async Task<IResult> GetAssetAsync(string file, HttpContext http)
     {
-        file = Path.GetFileName((file ?? string.Empty).Trim());
-        if (file.Length == 0)
+        if (!TryResolveAssetPath(file, out var relative, out var path))
             return Results.NotFound();
-
-        var path = Path.Combine(GetWwwrootPath(), "assets", file);
         if (!File.Exists(path))
             return Results.NotFound();
 
-        http.Response.Headers.CacheControl = "public, max-age=31536000, immutable";
+        // 模块资源路径默认不含内容哈希，必须允许浏览器重新验证。
+        http.Response.Headers.CacheControl = "no-cache";
         var bytes = await File.ReadAllBytesAsync(path, http.RequestAborted);
-        return Results.File(bytes, GetContentType(file));
+        return Results.File(bytes, GetContentType(relative));
     }
 
     private static IResult GetStateAsync()
@@ -105,6 +107,30 @@ public sealed class {{MODULE_CLASS}} : ITelegramPanelModule, IModuleUiProvider
         return Path.Combine(baseDir, "wwwroot");
     }
 
+    private static bool TryResolveAssetPath(string? file, out string relative, out string path)
+    {
+        relative = (file ?? string.Empty).Trim().Replace('\\', '/').TrimStart('/');
+        path = string.Empty;
+        if (relative.Length == 0 || Path.IsPathRooted(relative))
+            return false;
+
+        var segments = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Any(segment => segment is "." or ".."))
+            return false;
+
+        try
+        {
+            var assetsRoot = Path.GetFullPath(Path.Combine(GetWwwrootPath(), "assets"));
+            path = Path.GetFullPath(Path.Combine(assetsRoot, Path.Combine(segments)));
+            var assetsPrefix = assetsRoot.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return path.StartsWith(assetsPrefix, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
+
     private static string GetContentType(string file)
     {
         var ext = Path.GetExtension(file).ToLowerInvariant();
@@ -117,6 +143,14 @@ public sealed class {{MODULE_CLASS}} : ITelegramPanelModule, IModuleUiProvider
             ".png" => "image/png",
             ".jpg" or ".jpeg" => "image/jpeg",
             ".webp" => "image/webp",
+            ".avif" => "image/avif",
+            ".gif" => "image/gif",
+            ".ico" => "image/x-icon",
+            ".woff" => "font/woff",
+            ".woff2" => "font/woff2",
+            ".ttf" => "font/ttf",
+            ".otf" => "font/otf",
+            ".wasm" => "application/wasm",
             _ => "application/octet-stream"
         };
     }
