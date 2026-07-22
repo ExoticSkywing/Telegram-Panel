@@ -14,20 +14,20 @@ function section(startName, endMarker) {
 }
 
 test('导入代理策略默认为未选择并禁用提交', () => {
-  assert.match(source, /const proxyStrategy = ref<AccountProxyStrategy \| ''>\(''\)/)
+  assert.match(source, /const proxyStrategy = ref<ZipImportProxyStrategy \| ''>\(''\)/)
   assert.match(source, /const proxySelectionInvalid = computed/)
 })
 
 test('所有导入方式都在发请求前校验并冻结代理选择', () => {
   const cases = [
-    ['importZip', 'async function importSessionFiles()', 'panelApi.importAccountsZip'],
-    ['importSessionFiles', 'async function importStringSession()', 'panelApi.importAccountsSessionFiles'],
-    ['importStringSession', 'function applyImportResponse(', 'panelApi.importAccountsStringSession'],
+    ['importZip', 'async function importSessionFiles()', 'if (!ensureProxySelected(true)) return', 'panelApi.importAccountsZip'],
+    ['importSessionFiles', 'async function importStringSession()', 'if (!ensureProxySelected()) return', 'panelApi.importAccountsSessionFiles'],
+    ['importStringSession', 'function applyImportResponse(', 'if (!ensureProxySelected()) return', 'panelApi.importAccountsStringSession'],
   ]
 
-  for (const [name, endMarker, requestCall] of cases) {
+  for (const [name, endMarker, ensureCall, requestCall] of cases) {
     const body = section(name, endMarker)
-    const ensureIndex = body.indexOf('if (!ensureProxySelected()) return')
+    const ensureIndex = body.indexOf(ensureCall)
     const snapshotIndex = body.indexOf('const selectedStrategy = proxyStrategy.value')
     const requestIndex = body.indexOf(requestCall)
 

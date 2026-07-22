@@ -29,6 +29,7 @@
         :disabled="busy"
       >
         <el-radio-button value="existing">已有代理</el-radio-button>
+        <el-radio-button value="proxy_per_account">批量代理一对一</el-radio-button>
         <el-radio-button value="warp_per_account" :disabled="!warpAvailable">每账号独立 WARP</el-radio-button>
         <el-radio-button value="global">全局设置</el-radio-button>
         <el-radio-button value="direct">直连（确认风险）</el-radio-button>
@@ -60,6 +61,9 @@
       </div>
       <div v-else-if="proxyStrategy === 'warp_per_account'" class="proxy-route-notice warning">
         每个账号都会创建一个独立 Docker 容器和数据卷；批量导入会按账号数量持续占用服务器内存与 CPU。
+      </div>
+      <div v-else-if="proxyStrategy === 'proxy_per_account'" class="proxy-route-notice warning">
+        批量代理一对一仅适用于 Zip 导入；Session 文件和 StringSession 导入在此模式下不可用。
       </div>
     </section>
 
@@ -111,6 +115,34 @@
         class="mt-4"
         :disabled="busy"
       />
+      <div v-if="isPerAccountProxyBatch" class="batch-proxy-editor mt-4">
+        <div class="batch-proxy-editor-heading">
+          <div>
+            <div class="cell-main">逐账号批量代理</div>
+            <div class="cell-sub">仅支持 HTTP 和 SOCKS5，每行一个代理</div>
+          </div>
+          <el-tag :type="perAccountProxyLimitExceeded ? 'danger' : perAccountProxyCount > 0 ? 'primary' : 'info'" effect="plain">
+            {{ perAccountProxyCount }} / {{ PER_ACCOUNT_PROXY_LIMIT }} 条有效代理
+          </el-tag>
+        </div>
+        <el-input
+          v-model="perAccountProxyText"
+          type="textarea"
+          :rows="8"
+          resize="vertical"
+          maxlength="100000"
+          autocomplete="off"
+          :spellcheck="false"
+          placeholder="http://用户名:密码@主机:端口&#10;socks5://用户名:密码@主机:端口"
+          :disabled="busy"
+          aria-label="逐账号批量代理地址"
+        />
+        <ul class="batch-proxy-rules">
+          <li>单次最多 100 条；空行和以 # 开头的注释行不计数，重复代理仍各占一个账号槽位。</li>
+          <li>账号按 Zip 内规范化相对路径稳定排序，第 1 个账号对应第 1 条有效代理，账号数与代理数必须完全一致。</li>
+          <li>系统先检测全部代理；全部成功后才新增代理并连接 Telegram，账号首次请求即使用对应代理，不会先直连再绑定。</li>
+        </ul>
+      </div>
       <el-button
         type="success"
         class="full-btn mt-4"
@@ -118,7 +150,7 @@
         :disabled="busy || !zipFile || proxySelectionInvalid"
         @click="importZip"
       >
-        开始导入 Zip
+        {{ isPerAccountProxyBatch ? '检测代理并导入 Zip' : '开始导入 Zip' }}
       </el-button>
     </el-card>
 
@@ -136,9 +168,9 @@
           accept=".session"
           :on-change="onSessionChange"
           :on-remove="onSessionRemove"
-          :disabled="busy"
+          :disabled="busy || isPerAccountProxyBatch"
         >
-          <el-button type="primary" :icon="UploadFilled" :disabled="busy">选择 Session 文件</el-button>
+          <el-button type="primary" :icon="UploadFilled" :disabled="busy || isPerAccountProxyBatch">选择 Session 文件</el-button>
         </el-upload>
         <div v-if="sessionFiles.length" class="file-list">
           <div v-for="file in sessionFiles" :key="file.uid" class="file-item">
@@ -167,7 +199,7 @@
           type="textarea"
           :rows="7"
           placeholder="Session String (Base64)"
-          :disabled="busy"
+          :disabled="busy || isPerAccountProxyBatch"
         />
         <el-button
           type="success"
@@ -215,6 +247,21 @@
         </el-table-column>
         <el-table-column prop="username" label="用户名" min-width="130">
           <template #default="{ row }">{{ row.username ? `@${row.username}` : '-' }}</template>
+        </el-table-column>
+        <el-table-column v-if="hasImportSourceDetails" prop="sourceKey" label="Zip 来源" min-width="180">
+          <template #default="{ row }">{{ row.sourceKey || '-' }}</template>
+        </el-table-column>
+        <el-table-column v-if="hasImportProxyDetails" prop="proxyLine" label="代理行" width="90">
+          <template #default="{ row }">{{ row.proxyLine ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column v-if="hasImportProxyDetails" prop="proxyId" label="代理 ID" width="96">
+          <template #default="{ row }">{{ row.proxyId ?? '-' }}</template>
+        </el-table-column>
+        <el-table-column v-if="hasImportProxyDetails" prop="proxyName" label="代理名称" min-width="150">
+          <template #default="{ row }">{{ row.proxyName || '-' }}</template>
+        </el-table-column>
+        <el-table-column v-if="hasImportProxyDetails" prop="proxyEgressIp" label="出口 IP" min-width="150">
+          <template #default="{ row }">{{ row.proxyEgressIp || '-' }}</template>
         </el-table-column>
         <el-table-column label="状态" width="104">
           <template #default="{ row }">
@@ -487,7 +534,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import type { Component } from 'vue'
 import type { TableInstance, UploadFile } from 'element-plus'
@@ -520,6 +567,7 @@ import type {
   ImportResult,
   OutboundProxy,
   WarpRuntimeStatus,
+  ZipImportProxyStrategy,
 } from '@/api/types'
 import { formatTime } from '@/utils/format'
 import { accountCategoryTagStyle } from '@/utils/categoryStyle'
@@ -527,11 +575,13 @@ import { getImportResultFeedback, summarizeImportResults } from '@/utils/importR
 
 type Row = AccountListItem & { busy?: boolean }
 type SelectionMode = 'select' | 'invert' | 'clear'
+const PER_ACCOUNT_PROXY_LIMIT = 100
 
 const router = useRouter()
 const zipFile = ref<File | null>(null)
 const zipUploadFiles = ref<UploadFile[]>([])
 const zipTwoFactorPassword = ref('')
+const perAccountProxyText = ref('')
 const sessionFiles = ref<UploadFile[]>([])
 const sessionString = ref('')
 const importingZip = ref(false)
@@ -544,7 +594,7 @@ const rows = ref<Row[]>([])
 const categories = ref<AccountCategory[]>([])
 const dictionaries = ref<DataDictionary[]>([])
 const proxies = ref<OutboundProxy[]>([])
-const proxyStrategy = ref<AccountProxyStrategy | ''>('')
+const proxyStrategy = ref<ZipImportProxyStrategy | ''>('')
 const proxyId = ref<number | null>(null)
 const warpStatus = ref<WarpRuntimeStatus | null>(null)
 const tableRef = ref<TableInstance>()
@@ -565,14 +615,38 @@ const warpAvailable = computed(() => Boolean(
   && warpStatus.value.enabled
   && warpStatus.value.dockerAvailable,
 ))
+const isPerAccountProxyBatch = computed(() => proxyStrategy.value === 'proxy_per_account')
+const perAccountProxyCount = computed(() => countEffectiveProxyLines(perAccountProxyText.value))
+const perAccountProxyLimitExceeded = computed(() => perAccountProxyCount.value > PER_ACCOUNT_PROXY_LIMIT)
 const proxySelectionInvalid = computed(() =>
   !proxyStrategy.value
   || (proxyStrategy.value === 'existing' && !proxyId.value)
-  || (proxyStrategy.value === 'warp_per_account' && !warpAvailable.value),
+  || (proxyStrategy.value === 'warp_per_account' && !warpAvailable.value)
+  || (isPerAccountProxyBatch.value
+    && (perAccountProxyCount.value === 0 || perAccountProxyLimitExceeded.value)),
 )
-const sessionImportDisabled = computed(() => busy.value || sessionFiles.value.length === 0 || shouldBlockApiImport.value || proxySelectionInvalid.value)
-const stringImportDisabled = computed(() => busy.value || !sessionString.value.trim() || shouldBlockApiImport.value || proxySelectionInvalid.value)
+const sessionImportDisabled = computed(() =>
+  busy.value
+  || isPerAccountProxyBatch.value
+  || sessionFiles.value.length === 0
+  || shouldBlockApiImport.value
+  || proxySelectionInvalid.value,
+)
+const stringImportDisabled = computed(() =>
+  busy.value
+  || isPerAccountProxyBatch.value
+  || !sessionString.value.trim()
+  || shouldBlockApiImport.value
+  || proxySelectionInvalid.value,
+)
 const importFeedbackSummary = computed(() => summarizeImportResults(importResults.value))
+const hasImportSourceDetails = computed(() => importResults.value.some((result) => Boolean(result.sourceKey)))
+const hasImportProxyDetails = computed(() => importResults.value.some((result) =>
+  result.proxyLine != null
+  || result.proxyId != null
+  || Boolean(result.proxyName)
+  || Boolean(result.proxyEgressIp),
+))
 const imageDictionaries = computed(() =>
   dictionaries.value
     .filter((x) => x.isEnabled && x.type === 'image' && x.enabledItemCount > 0)
@@ -672,10 +746,28 @@ function onBatchAvatarRemove() {
   batchProfile.avatarFile = null
 }
 
-function ensureProxySelected() {
+function countEffectiveProxyLines(text: string) {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .reduce((count, line) => {
+      const normalized = line.trim()
+      return normalized.length > 0 && !normalized.startsWith('#') ? count + 1 : count
+    }, 0)
+}
+
+function ensureProxySelected(allowPerAccountBatch = false) {
+  if (isPerAccountProxyBatch.value && !allowPerAccountBatch) {
+    ElMessage.warning('批量代理一对一仅支持 Zip 导入，请更换代理方式')
+    return false
+  }
   if (!proxySelectionInvalid.value) return true
   if (!proxyStrategy.value) {
     ElMessage.warning('请先明确选择导入账号首次连接使用的代理方式')
+  } else if (isPerAccountProxyBatch.value) {
+    ElMessage.warning(perAccountProxyLimitExceeded.value
+      ? `逐账号批量代理单次最多 ${PER_ACCOUNT_PROXY_LIMIT} 条`
+      : '请填写逐账号批量代理，每行一个代理地址')
   } else {
     ElMessage.warning(proxyStrategy.value === 'warp_per_account' ? '当前环境无法创建 WARP' : '请选择已有代理')
   }
@@ -693,9 +785,23 @@ function appendProxyFields(
   }
 }
 
+function appendZipProxyFields(
+  form: FormData,
+  strategy: ZipImportProxyStrategy,
+  selectedProxyId: number | null,
+  selectedProxyText: string,
+) {
+  form.append('proxyStrategy', strategy)
+  if (strategy === 'proxy_per_account') {
+    form.append('proxyText', selectedProxyText)
+  } else if (strategy === 'existing' && selectedProxyId) {
+    form.append('proxyId', String(selectedProxyId))
+  }
+}
+
 async function importZip() {
   if (busy.value) return
-  if (!ensureProxySelected()) return
+  if (!ensureProxySelected(true)) return
   if (!zipFile.value) {
     ElMessage.warning('请先选择 Zip 压缩包')
     return
@@ -703,17 +809,24 @@ async function importZip() {
 
   const selectedZip = zipFile.value
   const selectedPassword = zipTwoFactorPassword.value
-  const selectedStrategy = proxyStrategy.value as AccountProxyStrategy
+  const selectedStrategy = proxyStrategy.value as ZipImportProxyStrategy
   const selectedProxyId = proxyId.value
+  const selectedProxyText = perAccountProxyText.value
   const form = new FormData()
   form.append('file', selectedZip)
   form.append('twoFactorPassword', selectedPassword)
-  appendProxyFields(form, selectedStrategy, selectedProxyId)
+  appendZipProxyFields(form, selectedStrategy, selectedProxyId, selectedProxyText)
 
   const operationToken = ++importOperationToken
   importingZip.value = true
   try {
-    const response = await panelApi.importAccountsZip(form)
+    let response: ImportAccountsResponse
+    try {
+      response = await panelApi.importAccountsZip(form)
+    } catch {
+      // 响应拦截器已展示错误；禁止把含 proxyText 的 AxiosError 交给全局日志。
+      return
+    }
     if (operationToken !== importOperationToken) return
     applyImportResponse(response)
     if (zipFile.value === selectedZip) {
@@ -721,6 +834,9 @@ async function importZip() {
       zipUploadFiles.value = []
     }
     if (zipTwoFactorPassword.value === selectedPassword) zipTwoFactorPassword.value = ''
+    if (selectedStrategy === 'proxy_per_account' && perAccountProxyText.value === selectedProxyText) {
+      perAccountProxyText.value = ''
+    }
   } finally {
     if (operationToken === importOperationToken) importingZip.value = false
   }
@@ -1239,6 +1355,11 @@ onMounted(() => {
     loadTelegramApiStatus(),
   ])
 })
+
+onBeforeUnmount(() => {
+  // 代理认证信息只在当前导入会话中使用，离开页面后不保留在组件内存。
+  perAccountProxyText.value = ''
+})
 </script>
 
 <style scoped>
@@ -1312,6 +1433,32 @@ onMounted(() => {
 
 .import-tip-alert :deep(.el-alert__content) {
   width: 100%;
+}
+
+.batch-proxy-editor {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--tp-border);
+  border-left: 4px solid var(--el-color-warning);
+  border-radius: 4px;
+  background: var(--tp-panel-2);
+}
+
+.batch-proxy-editor-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.batch-proxy-rules {
+  margin: 0 0 0 18px;
+  padding: 0;
+  color: var(--tp-muted);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .import-grid {

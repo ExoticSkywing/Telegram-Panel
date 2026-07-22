@@ -1667,24 +1667,56 @@ public static class PanelAdminApiEndpoints
 
         var categoryId = ParseNullableInt(form["categoryId"]);
         var twoFactorPassword = NormalizeNullable(form["twoFactorPassword"]);
-        var proxyBinding = ParseImportProxyBinding(form["proxyStrategy"], form["proxyId"]);
-        if (proxyBinding == null)
+        var proxyStrategy = form["proxyStrategy"].ToString().Trim().ToLowerInvariant();
+        var usesPerAccountProxyBatch = proxyStrategy == "proxy_per_account";
+        var perAccountProxyText = usesPerAccountProxyBatch
+            ? form["proxyText"].ToString()
+            : null;
+        AccountProxyBindingInput? proxyBinding = null;
+        if (usesPerAccountProxyBatch)
         {
-            return Results.BadRequest(new OperationResultDto(
-                false,
-                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连"));
+            if (string.IsNullOrWhiteSpace(perAccountProxyText))
+            {
+                return Results.BadRequest(new OperationResultDto(
+                    false,
+                    "请填写逐账号批量代理，每行一个代理地址"));
+            }
+            if (perAccountProxyText.Length > ProxyManagementService.MaxPerAccountProxyTextLength)
+            {
+                return Results.BadRequest(new OperationResultDto(
+                    false,
+                    "批量代理文本不能超过 100000 个字符"));
+            }
         }
-        await proxyManagement.ValidateBindingInputAsync(proxyBinding, cancellationToken);
+        else
+        {
+            proxyBinding = ParseImportProxyBinding(proxyStrategy, form["proxyId"]);
+            if (proxyBinding == null)
+            {
+                return Results.BadRequest(new OperationResultDto(
+                    false,
+                    "请先明确选择账号首次连接出口：已有代理、逐账号批量代理、独立 WARP、已配置的全局代理或明确直连"));
+            }
+            await proxyManagement.ValidateBindingInputAsync(proxyBinding, cancellationToken);
+        }
 
         await using var stream = file.OpenReadStream();
-        var results = await importService.ImportFromZipStreamAsync(
-            file.FileName,
-            stream,
-            categoryId,
-            twoFactorPassword,
-            proxyBinding,
-            cancellationToken);
-        return Results.Ok(await BuildImportResponseAsync(results, accountManagement));
+        try
+        {
+            var results = await importService.ImportFromZipStreamAsync(
+                file.FileName,
+                stream,
+                categoryId,
+                twoFactorPassword,
+                proxyBinding,
+                cancellationToken,
+                perAccountProxyText);
+            return Results.Ok(await BuildImportResponseAsync(results, accountManagement));
+        }
+        catch (AccountImportProxyBatchException ex)
+        {
+            return Results.BadRequest(new OperationResultDto(false, ex.Message));
+        }
     }
 
     private static async Task<IResult> ImportAccountsSessionFilesAsync(
@@ -1714,7 +1746,7 @@ public static class PanelAdminApiEndpoints
         {
             return Results.BadRequest(new OperationResultDto(
                 false,
-                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连"));
+                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连；逐账号批量代理仅支持 Zip 导入"));
         }
         if (string.Equals(
                 proxyBinding.Strategy,
@@ -1769,7 +1801,7 @@ public static class PanelAdminApiEndpoints
         {
             return Results.BadRequest(new OperationResultDto(
                 false,
-                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连"));
+                "请先明确选择账号首次连接出口：已有代理、独立 WARP、已配置的全局代理或明确直连；逐账号批量代理仅支持 Zip 导入"));
         }
         await proxyManagement.ValidateBindingInputAsync(proxyBinding, cancellationToken);
 
@@ -6161,7 +6193,11 @@ public static class PanelAdminApiEndpoints
         string? strategy,
         string? proxyId)
     {
-        if (string.IsNullOrWhiteSpace(strategy))
+        if (string.IsNullOrWhiteSpace(strategy)
+            || string.Equals(
+                strategy.Trim(),
+                "proxy_per_account",
+                StringComparison.OrdinalIgnoreCase))
             return null;
 
         var parsedProxyId = ParseNullableInt(proxyId);
@@ -6224,7 +6260,18 @@ public static class PanelAdminApiEndpoints
     }
 
     private static ImportResultDto ToDto(ImportResult result) =>
-        new(result.Success, result.Phone, result.UserId, result.Username, result.SessionPath, result.Error);
+        new(
+            result.Success,
+            result.Phone,
+            result.UserId,
+            result.Username,
+            result.SessionPath,
+            result.Error,
+            result.SourceKey,
+            result.ProxyLine,
+            result.ProxyId,
+            result.ProxyName,
+            result.ProxyEgressIp);
 
     private static async Task<IResult> BuildLoginResponseAsync(
         int loginId,
@@ -7368,7 +7415,12 @@ public sealed record ImportResultDto(
     long? UserId,
     string? Username,
     string? SessionPath,
-    string? Error);
+    string? Error,
+    string? SourceKey = null,
+    int? ProxyLine = null,
+    int? ProxyId = null,
+    string? ProxyName = null,
+    string? ProxyEgressIp = null);
 public sealed record ImportAccountsResponseDto(
     IReadOnlyList<ImportResultDto> Results,
     IReadOnlyList<AccountListItemDto> Accounts);

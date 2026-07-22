@@ -239,7 +239,8 @@ public class AccountImportService
         int? categoryId = null,
         string? twoFactorPassword = null,
         AccountProxyBindingInput? proxyBinding = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? perAccountProxyText = null)
     {
         var results = new List<ImportResult>();
 
@@ -256,7 +257,8 @@ public class AccountImportService
             categoryId,
             twoFactorPassword,
             proxyBinding,
-            cancellationToken);
+            cancellationToken,
+            perAccountProxyText);
     }
 
     /// <summary>
@@ -268,7 +270,8 @@ public class AccountImportService
         int? categoryId = null,
         string? twoFactorPassword = null,
         AccountProxyBindingInput? proxyBinding = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? perAccountProxyText = null)
     {
         var results = new List<ImportResult>();
 
@@ -288,11 +291,11 @@ public class AccountImportService
             // ZipFile.ExtractToDirectory 会直接抛异常。这里改为手动解压并容错处理。
             await ExtractZipToDirectorySafeAsync(tempZipPath, extractDir, cancellationToken);
 
-            var tdataDirs = FindTdataDirectories(extractDir);
+            var tdataDirs = OrderImportPaths(extractDir, FindTdataDirectories(extractDir));
             var allJsonFiles = Directory.EnumerateFiles(extractDir, "*.json", SearchOption.AllDirectories).ToList();
-            var jsonFiles = allJsonFiles
-                .Where(path => !IsPathInsideAnyDirectory(path, tdataDirs))
-                .ToList();
+            var jsonFiles = OrderImportPaths(
+                extractDir,
+                allJsonFiles.Where(path => !IsPathInsideAnyDirectory(path, tdataDirs)));
             var candidateCount = jsonFiles.Count > 0 ? jsonFiles.Count : tdataDirs.Count;
             EnsurePerAccountWarpBatchLimit(proxyBinding, candidateCount);
 
@@ -304,31 +307,62 @@ public class AccountImportService
                     skippedTdataJsonCount);
             }
 
-            if (jsonFiles.Count == 0)
+            if (jsonFiles.Count == 0 && tdataDirs.Count == 0)
             {
-                if (tdataDirs.Count > 0)
-                {
-                    results.AddRange(await ImportFromTdataDirectoriesAsync(
-                        tdataDirs,
-                        categoryId,
-                        twoFactorPassword,
-                        proxyBinding,
-                        cancellationToken));
-                    var tdataSuccess = results.Count(r => r.Success);
-                    _logger.LogInformation("Tdata import completed: {Success}/{Total} successful", tdataSuccess, results.Count);
-                    return results;
-                }
-
                 results.Add(new ImportResult(false, null, null, null, null, "压缩包内未找到任何账号配置 json 或可识别的 tdata 目录"));
                 return results;
             }
 
-            var importedPhones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var jsonPath in jsonFiles)
+            if (perAccountProxyText != null && proxyBinding != null)
+                throw new AccountImportProxyBatchException("逐账号批量代理不能与其他代理策略同时使用");
+
+            // 纯 tdata 导入共享同一组全局 Telegram API 配置。这是整批的
+            // 本地前置条件，必须在代理检测和持久化之前失败。
+            if (jsonFiles.Count == 0 && !TryGetGlobalTelegramApi(out _, out _))
             {
+                results.Add(new ImportResult(
+                    false,
+                    null,
+                    null,
+                    null,
+                    null,
+                    "检测到 tdata 数据包，但系统未配置全局 Telegram API（ApiId/ApiHash）；请先到【系统设置】配置后再导入"));
+                return results;
+            }
+
+            IReadOnlyList<PreparedAccountImportProxy>? proxyAssignments = null;
+            if (perAccountProxyText != null)
+            {
+                proxyAssignments = await _proxyManagement.PreparePerAccountImportProxiesAsync(
+                    perAccountProxyText,
+                    candidateCount,
+                    cancellationToken);
+            }
+
+            if (jsonFiles.Count == 0)
+            {
+                results.AddRange(await ImportFromTdataDirectoriesAsync(
+                    tdataDirs,
+                    extractDir,
+                    categoryId,
+                    twoFactorPassword,
+                    proxyBinding,
+                    proxyAssignments,
+                    cancellationToken));
+                var tdataSuccess = results.Count(r => r.Success);
+                _logger.LogInformation("Tdata import completed: {Success}/{Total} successful", tdataSuccess, results.Count);
+                return results;
+            }
+
+            var importedPhones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (var index = 0; index < jsonFiles.Count; index++)
+            {
+                var jsonPath = jsonFiles[index];
+                var assignment = proxyAssignments?[index];
+                var effectiveBinding = BuildZipProxyBinding(proxyBinding, assignment);
                 var result = await ExecuteImportWithProxyAsync(
                     Path.GetFileNameWithoutExtension(jsonPath),
-                    proxyBinding,
+                    effectiveBinding,
                     importedPhones: null,
                     proxy => ImportFromPackageEntryAsync(
                         jsonPath,
@@ -338,12 +372,23 @@ public class AccountImportService
                         proxy,
                         cancellationToken),
                     cancellationToken);
-                results.Add(result);
+                results.Add(AttachZipImportMetadata(
+                    result,
+                    BuildImportSourceKey(extractDir, jsonPath),
+                    assignment));
             }
 
             var successCount = results.Count(r => r.Success);
             _logger.LogInformation("Zip import completed: {Success}/{Total} successful", successCount, results.Count);
             return results;
+        }
+        catch (AccountImportProxyBatchException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -632,10 +677,12 @@ public class AccountImportService
     }
 
     private async Task<List<ImportResult>> ImportFromTdataDirectoriesAsync(
-        IReadOnlyCollection<string> tdataDirectories,
+        IReadOnlyList<string> tdataDirectories,
+        string importRoot,
         int? categoryId,
         string? twoFactorPassword,
         AccountProxyBindingInput? proxyBinding,
+        IReadOnlyList<PreparedAccountImportProxy>? proxyAssignments,
         CancellationToken cancellationToken)
     {
         var results = new List<ImportResult>();
@@ -653,11 +700,14 @@ public class AccountImportService
         }
 
         var importedPhones = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var tdataDir in tdataDirectories.Distinct(StringComparer.OrdinalIgnoreCase))
+        for (var index = 0; index < tdataDirectories.Count; index++)
         {
+            var tdataDir = tdataDirectories[index];
+            var assignment = proxyAssignments?[index];
+            var effectiveBinding = BuildZipProxyBinding(proxyBinding, assignment);
             var result = await ExecuteImportWithProxyAsync(
                 Path.GetFileName(tdataDir),
-                proxyBinding,
+                effectiveBinding,
                 importedPhones,
                 proxy => ImportFromTdataDirectoryAsync(
                     tdataDir,
@@ -672,7 +722,10 @@ public class AccountImportService
                     apiHash,
                     categoryId,
                     twoFactorPassword));
-            results.Add(result);
+            results.Add(AttachZipImportMetadata(
+                result,
+                BuildImportSourceKey(importRoot, tdataDir),
+                assignment));
         }
 
         return results;
@@ -1105,6 +1158,13 @@ public class AccountImportService
             var connection = AccountProxyResolver.BuildConnectionOptions(
                 proxy,
                 stableImportKey);
+            if (binding.ExpectedConnection != null
+                && !SameConnection(binding.ExpectedConnection, connection))
+            {
+                throw new ProxyBindingConflictException(
+                    "批量代理检测后连接参数已变化，账号尚未发起首次连接，请重新导入");
+            }
+            var frozenConnection = binding.ExpectedConnection ?? connection;
             IDisposable? warpUsageClaim = null;
             if (proxy.Kind == OutboundProxyKinds.Warp && _warpProxyUsageGuard != null)
             {
@@ -1113,7 +1173,7 @@ public class AccountImportService
                         "所选 WARP 正在维护或被另一个首次连接流程使用，请稍后重试；账号尚未发起首次连接");
             }
             return new PreparedImportProxy(
-                connection,
+                frozenConnection,
                 null,
                 resinLease,
                 resinLease != null ? stableImportKey : null,
@@ -1496,6 +1556,9 @@ public class AccountImportService
             return false;
 
         var fullFilePath = Path.GetFullPath(filePath);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
         foreach (var directory in directories)
         {
             var fullDirectoryPath = Path.GetFullPath(directory);
@@ -1503,12 +1566,63 @@ public class AccountImportService
                 ? fullDirectoryPath
                 : fullDirectoryPath + Path.DirectorySeparatorChar;
 
-            if (fullFilePath.StartsWith(fullDirectoryPathWithSep, StringComparison.OrdinalIgnoreCase))
+            if (fullFilePath.StartsWith(fullDirectoryPathWithSep, comparison))
                 return true;
         }
 
         return false;
     }
+
+    private static List<string> OrderImportPaths(
+        string importRoot,
+        IEnumerable<string> paths) =>
+        paths
+            .Distinct(StringComparer.Ordinal)
+            .Select(path => new
+            {
+                Path = path,
+                Key = BuildImportSourceKey(importRoot, path)
+            })
+            .OrderBy(item => item.Key, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Key, StringComparer.Ordinal)
+            .Select(item => item.Path)
+            .ToList();
+
+    private static string BuildImportSourceKey(string importRoot, string path)
+    {
+        var key = Path.GetRelativePath(importRoot, path)
+            .Replace(Path.DirectorySeparatorChar, '/')
+            .Replace(Path.AltDirectorySeparatorChar, '/');
+        if (key == ".")
+        {
+            key = Path.GetFileName(
+                path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        }
+        return string.IsNullOrWhiteSpace(key) ? "account" : key;
+    }
+
+    private static AccountProxyBindingInput? BuildZipProxyBinding(
+        AccountProxyBindingInput? fallback,
+        PreparedAccountImportProxy? assignment) =>
+        assignment == null
+            ? fallback
+            : new AccountProxyBindingInput(
+                "existing",
+                assignment.ProxyId,
+                ExpectedConnection: assignment.ExpectedConnection);
+
+    private static ImportResult AttachZipImportMetadata(
+        ImportResult result,
+        string sourceKey,
+        PreparedAccountImportProxy? assignment) =>
+        result with
+        {
+            SourceKey = sourceKey,
+            ProxyLine = assignment?.SourceLine,
+            ProxyId = assignment?.ProxyId,
+            ProxyName = assignment?.ProxyName,
+            ProxyEgressIp = assignment?.EgressIp
+        };
 
     private static List<string> FindTdataDirectories(string rootDirectory)
     {
@@ -1523,7 +1637,7 @@ public class AccountImportService
         }
 
         return result
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Distinct(StringComparer.Ordinal)
             .ToList();
     }
 

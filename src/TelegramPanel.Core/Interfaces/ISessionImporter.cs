@@ -80,7 +80,12 @@ public record ImportResult(
     long? UserId,
     string? Username,
     string? SessionPath,
-    string? Error = null
+    string? Error = null,
+    string? SourceKey = null,
+    int? ProxyLine = null,
+    int? ProxyId = null,
+    string? ProxyName = null,
+    string? ProxyEgressIp = null
 )
 {
     /// <summary>
