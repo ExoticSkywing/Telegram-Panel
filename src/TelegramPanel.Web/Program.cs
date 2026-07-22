@@ -739,6 +739,10 @@ using (var scope = app.Services.CreateScope())
     }
 }
 
+PersistentStorageBootstrapper.CompleteDatabaseMigration(
+    persistentStorage,
+    message => Log.Information("[Storage] {Message}", message));
+
 // Configure the HTTP request pipeline.
 if (!app.Environment.IsDevelopment())
 {
