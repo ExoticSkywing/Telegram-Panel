@@ -29,6 +29,7 @@ src/TelegramPanel.Web/appsettings.local.json
 
 # Admin auth credentials
 src/TelegramPanel.Web/admin_auth.json
+.storage-migration-v1-*.complete
 
 # Sessions
 sessions/

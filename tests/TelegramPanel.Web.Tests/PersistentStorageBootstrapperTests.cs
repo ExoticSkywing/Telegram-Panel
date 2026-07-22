@@ -218,6 +218,8 @@ public sealed class PersistentStorageBootstrapperTests
             var now = DateTime.UtcNow;
             File.SetLastWriteTimeUtc(newerPath, now.AddMinutes(-1));
             File.SetLastWriteTimeUtc(olderPath, now.AddMinutes(-2));
+            File.WriteAllBytes(olderPath + "-shm", Array.Empty<byte>());
+            File.SetLastWriteTimeUtc(olderPath + "-shm", now);
 
             var paths = PersistentStorageBootstrapper.Initialize(
                 CreateConfiguration(persistentRoot),
@@ -230,6 +232,92 @@ public sealed class PersistentStorageBootstrapperTests
                 SearchOption.TopDirectoryOnly);
             Assert.Single(backups);
             Assert.Equal(0, ReadAccountCount(backups[0]));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_DoesNotReapplyLegacyDataAfterMigrationCompletes()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "data");
+            var legacySessions = Path.Combine(legacyRoot, "sessions");
+            Directory.CreateDirectory(legacySessions);
+            Directory.CreateDirectory(persistentRoot);
+            CreateAccountsDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), 2);
+            File.WriteAllText(
+                Path.Combine(legacyRoot, "admin_auth.json"),
+                CreateCredentialJson("legacy-user", "legacy-password", mustChangePassword: false));
+            File.WriteAllText(Path.Combine(legacySessions, "100.session"), "legacy-session");
+
+            var first = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
+
+            Assert.Equal(2, ReadAccountCount(first.DatabasePath));
+            Assert.Equal("legacy-user", ReadCredentialUsername(first.CredentialsPath));
+            var migratedSession = Path.Combine(first.SessionsPath, "100.session");
+            Assert.True(File.Exists(migratedSession));
+            Assert.Single(Directory.GetFiles(
+                persistentRoot,
+                ".storage-migration-v1-*.complete",
+                SearchOption.TopDirectoryOnly));
+
+            using (var connection = new SqliteConnection(
+                       $"Data Source={first.DatabasePath};Pooling=False"))
+            {
+                connection.Open();
+                ExecuteNonQuery(connection, "DELETE FROM Accounts;");
+            }
+            File.Delete(migratedSession);
+            File.WriteAllText(
+                first.CredentialsPath,
+                CreateCredentialJson("tgpanel", "tgpanel123", mustChangePassword: true));
+
+            var second = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
+
+            Assert.Equal(0, ReadAccountCount(second.DatabasePath));
+            Assert.Equal("tgpanel", ReadCredentialUsername(second.CredentialsPath));
+            Assert.False(File.Exists(migratedSession));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Initialize_DoesNotFallBackToLegacyDatabaseAfterCompletedTargetIsCorrupted()
+    {
+        var root = CreateTempDirectory();
+        try
+        {
+            var legacyRoot = Path.Combine(root, "old-app");
+            var persistentRoot = Path.Combine(root, "data");
+            Directory.CreateDirectory(legacyRoot);
+            Directory.CreateDirectory(persistentRoot);
+            CreateAccountsDatabase(Path.Combine(legacyRoot, "telegram_panel.db"), 2);
+
+            var first = PersistentStorageBootstrapper.Initialize(
+                CreateConfiguration(persistentRoot),
+                new TestEnvironment(legacyRoot));
+            File.WriteAllText(first.DatabasePath, "corrupted-persistent-database");
+
+            var exception = Assert.Throws<InvalidDataException>(() =>
+                PersistentStorageBootstrapper.Initialize(
+                    CreateConfiguration(persistentRoot),
+                    new TestEnvironment(legacyRoot)));
+
+            Assert.Contains("旧目录迁移已完成", exception.Message, StringComparison.Ordinal);
+            Assert.Equal("corrupted-persistent-database", File.ReadAllText(first.DatabasePath));
         }
         finally
         {

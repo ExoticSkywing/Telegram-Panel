@@ -22,6 +22,7 @@ public static class PersistentStorageBootstrapper
     private const string LegacyDatabaseName = "telegram-panel.db";
     private const string DefaultCredentialsName = "admin_auth.json";
     private const string DefaultSessionsName = "sessions";
+    private const string LegacyMigrationMarkerPrefix = ".storage-migration-v1-";
 
     public static PersistentStoragePaths Initialize(
         IConfiguration configuration,
@@ -51,26 +52,42 @@ public static class PersistentStorageBootstrapper
             sessionsSetting,
             DefaultSessionsName);
 
-        var legacyBases = EnumerateLegacyBases(environment.ContentRootPath, writableRoot).ToList();
-        var databaseCandidates = EnumerateLegacyCandidates(legacyBases, databaseRelativePath)
-            .Concat(EnumerateLegacyCandidates(legacyBases, DefaultDatabaseName))
-            .Concat(EnumerateLegacyCandidates(legacyBases, LegacyDatabaseName));
-        TryMigrateSqliteDatabase(databasePath, databaseCandidates, report);
-        var credentialCandidates = EnumerateLegacyCandidates(
-                legacyBases,
-                ToLegacyRelativePath(credentialsSetting, DefaultCredentialsName))
-            .Concat(EnumerateLegacyCandidates(legacyBases, DefaultCredentialsName));
-        TryMigrateCredentialsFile(
-            credentialsPath,
-            credentialCandidates,
-            configuration,
-            report);
-        TryMigrateDirectory(
-            sessionsPath,
-            EnumerateLegacyCandidates(
-                legacyBases,
-                ToLegacyRelativePath(sessionsSetting, DefaultSessionsName)),
-            report);
+        var migrationMarkerPath = BuildLegacyMigrationMarkerPath(writableRoot, databasePath);
+        if (File.Exists(migrationMarkerPath))
+        {
+            ValidateCompletedMigrationDatabase(databasePath);
+            Directory.CreateDirectory(sessionsPath);
+            report?.Invoke($"旧目录持久化迁移已完成，跳过旧目录扫描：{migrationMarkerPath}");
+        }
+        else
+        {
+            var legacyBases = EnumerateLegacyBases(environment.ContentRootPath, writableRoot).ToList();
+            var databaseCandidates = EnumerateLegacyCandidates(legacyBases, databaseRelativePath)
+                .Concat(EnumerateLegacyCandidates(legacyBases, DefaultDatabaseName))
+                .Concat(EnumerateLegacyCandidates(legacyBases, LegacyDatabaseName));
+            TryMigrateSqliteDatabase(databasePath, databaseCandidates, report);
+            var credentialCandidates = EnumerateLegacyCandidates(
+                    legacyBases,
+                    ToLegacyRelativePath(credentialsSetting, DefaultCredentialsName))
+                .Concat(EnumerateLegacyCandidates(legacyBases, DefaultCredentialsName));
+            TryMigrateCredentialsFile(
+                credentialsPath,
+                credentialCandidates,
+                configuration,
+                report);
+            TryMigrateDirectory(
+                sessionsPath,
+                EnumerateLegacyCandidates(
+                    legacyBases,
+                    ToLegacyRelativePath(sessionsSetting, DefaultSessionsName)),
+                report);
+
+            if (CanCompleteLegacyMigration(databasePath))
+            {
+                WriteLegacyMigrationMarker(migrationMarkerPath);
+                report?.Invoke($"旧目录持久化迁移已完成：{migrationMarkerPath}");
+            }
+        }
 
         configuration["ConnectionStrings:DefaultConnection"] = connectionString;
         configuration["AdminAuth:CredentialsPath"] = credentialsPath;
@@ -120,6 +137,79 @@ public static class PersistentStorageBootstrapper
             return Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
 
         return path;
+    }
+
+    private static string BuildLegacyMigrationMarkerPath(
+        string writableRoot,
+        string databasePath)
+    {
+        var identity = string.Equals(databasePath, ":memory:", StringComparison.OrdinalIgnoreCase)
+            ? ":memory:"
+            : Path.GetFullPath(databasePath);
+        if (OperatingSystem.IsWindows())
+            identity = identity.ToUpperInvariant();
+
+        var hash = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(identity)))
+            .ToLowerInvariant()[..16];
+        return Path.Combine(
+            writableRoot,
+            $"{LegacyMigrationMarkerPrefix}{hash}.complete");
+    }
+
+    private static bool CanCompleteLegacyMigration(string databasePath) =>
+        string.Equals(databasePath, ":memory:", StringComparison.OrdinalIgnoreCase)
+        || InspectSqliteDatabase(databasePath).IsValid;
+
+    private static void ValidateCompletedMigrationDatabase(string databasePath)
+    {
+        if (string.Equals(databasePath, ":memory:", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        var inspection = InspectSqliteDatabase(databasePath);
+        if (!inspection.IsValid)
+        {
+            throw new InvalidDataException(
+                $"旧目录迁移已完成，但持久化数据库不可用；为防止回灌过期数据，已终止启动：{databasePath}；{inspection.Error}");
+        }
+    }
+
+    private static void WriteLegacyMigrationMarker(string markerPath)
+    {
+        var directory = Path.GetDirectoryName(markerPath)
+            ?? throw new InvalidOperationException("无法确定持久化迁移标记目录");
+        Directory.CreateDirectory(directory);
+        var temporaryPath = Path.Combine(
+            directory,
+            $".{Path.GetFileName(markerPath)}.tmp-{Guid.NewGuid():N}");
+        try
+        {
+            using (var stream = new FileStream(
+                       temporaryPath,
+                       FileMode.CreateNew,
+                       FileAccess.Write,
+                       FileShare.None,
+                       bufferSize: 4096,
+                       FileOptions.WriteThrough))
+            {
+                var content = Encoding.UTF8.GetBytes("1\n");
+                stream.Write(content);
+                stream.Flush(flushToDisk: true);
+            }
+
+            try
+            {
+                File.Move(temporaryPath, markerPath, overwrite: false);
+            }
+            catch (IOException) when (File.Exists(markerPath))
+            {
+                // 并发启动已完成同一迁移时，现有标记即为最终结果。
+            }
+        }
+        finally
+        {
+            TryDeleteTemporaryFile(temporaryPath);
+        }
     }
 
     private static IEnumerable<string> EnumerateLegacyBases(string contentRoot, string writableRoot)
@@ -676,13 +766,11 @@ public static class PersistentStorageBootstrapper
         var lastWriteTimeUtc = File.Exists(path)
             ? File.GetLastWriteTimeUtc(path)
             : default;
-        foreach (var artifact in EnumerateSqliteArtifacts(path).Skip(1))
-        {
-            if (File.Exists(artifact))
-                lastWriteTimeUtc = lastWriteTimeUtc >= File.GetLastWriteTimeUtc(artifact)
-                    ? lastWriteTimeUtc
-                    : File.GetLastWriteTimeUtc(artifact);
-        }
+        var walPath = path + "-wal";
+        if (File.Exists(walPath))
+            lastWriteTimeUtc = lastWriteTimeUtc >= File.GetLastWriteTimeUtc(walPath)
+                ? lastWriteTimeUtc
+                : File.GetLastWriteTimeUtc(walPath);
 
         return lastWriteTimeUtc;
     }
