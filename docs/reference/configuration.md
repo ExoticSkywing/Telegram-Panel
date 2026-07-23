@@ -71,6 +71,15 @@ Docker 下常用环境变量（见 `docker-compose.yml`）：
 - `Telegram__WebhookBaseUrl`：Webhook 公网 HTTPS 地址
 - `Telegram__WebhookSecretToken`：Webhook 验证密钥
 
+### Docker 更新来源
+
+- `TP_UPDATE_MODE`：容器启动时的程序来源。`auto`（默认）按版本选择镜像或 `/data/app-current`；`image` 固定使用镜像 `/app`；`binary` 固定优先使用已确认的 `/data/app-current`。
+- `TP_IMAGE`：Docker Compose 使用的镜像标签，例如 `ghcr.io/moeacgx/telegram-panel:dev-latest` 或 `latest`。
+
+`auto` 需要镜像内存在 `/app/version.txt` 才能比较版本。若旧的一键更新目录缺少
+`version.txt`，会将其视为未知旧版本，归档到 `/data/app-obsolete-*` 并使用有版本号的镜像。
+修改 `TP_UPDATE_MODE` 或 `TP_IMAGE` 后，需要执行 `docker compose up -d --force-recreate`。
+
 ## UI 保存到本地覆盖配置
 
 面板里的部分“保存”按钮会把设置写入 `appsettings.local.json`（Docker 下为 `/data/appsettings.local.json`），常见键：

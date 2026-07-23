@@ -76,12 +76,16 @@ EOF
 prefer_newer_image() {
   IMAGE_VERSION="$(read_version_file "$IMAGE_VERSION_FILE")"
   UPDATED_VERSION="$(read_version_file "$UPDATED_VERSION_FILE")"
-  if [ -n "$IMAGE_VERSION" ] && [ -n "$UPDATED_VERSION" ] \
-    && version_is_greater "$IMAGE_VERSION" "$UPDATED_VERSION"; then
+  if [ -n "$IMAGE_VERSION" ] \
+    && { [ -z "$UPDATED_VERSION" ] || version_is_greater "$IMAGE_VERSION" "$UPDATED_VERSION"; }; then
     OBSOLETE_APP_DIR="$DATA_DIR/app-obsolete-$(date +%Y%m%d%H%M%S)-$$"
     if mv "$UPDATED_APP_DIR" "$OBSOLETE_APP_DIR"; then
       APP_DIR="$DEFAULT_APP_DIR"
-      log "镜像版本 v$IMAGE_VERSION 高于持久化版本 v$UPDATED_VERSION，已归档旧版本并使用镜像目录"
+      if [ -n "$UPDATED_VERSION" ]; then
+        log "镜像版本 v$IMAGE_VERSION 高于持久化版本 v$UPDATED_VERSION，已归档旧版本并使用镜像目录"
+      else
+        log "持久化版本缺少 version.txt，已归档旧版本并使用镜像版本 v$IMAGE_VERSION"
+      fi
     else
       APP_DIR="$DEFAULT_APP_DIR"
       log "无法归档旧持久化版本，为避免阻塞镜像升级，使用镜像目录：$DEFAULT_APP_DIR"

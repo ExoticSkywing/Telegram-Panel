@@ -195,6 +195,37 @@ public sealed class EntrypointScriptTests
     }
 
     [Fact]
+    public void Entrypoint_PrefersVersionedImageWhenLegacySelfUpdateHasNoVersionFile()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var root = CreateTempDirectory();
+        try
+        {
+            var data = Path.Combine(root, "data");
+            var imageApp = Path.Combine(root, "app");
+            var current = Path.Combine(data, "app-current");
+            CreateRunnableVersion(imageApp, "1.31.38");
+            CreateRunnableVersion(current, "1.31.37");
+            File.Delete(Path.Combine(current, "version.txt"));
+            File.WriteAllText(Path.Combine(current, ".telegram-panel-update-confirmed"), "{}");
+
+            var resultPath = Path.Combine(root, "started-from.txt");
+            RunEntrypoint(data, imageApp, resultPath);
+
+            Assert.Equal(Path.GetFullPath(imageApp), File.ReadAllText(resultPath).Trim());
+            Assert.False(Directory.Exists(current));
+            var obsolete = Assert.Single(Directory.GetDirectories(data, "app-obsolete-*"));
+            Assert.False(File.Exists(Path.Combine(obsolete, "version.txt")));
+        }
+        finally
+        {
+            TryDeleteDirectory(root);
+        }
+    }
+
+    [Fact]
     public void Entrypoint_PrefersNewerConfirmedSelfUpdateOverOlderImage()
     {
         if (!OperatingSystem.IsLinux())

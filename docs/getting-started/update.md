@@ -6,7 +6,7 @@
 
 Docker 部署支持通过项目根目录 `.env` 的 `TP_UPDATE_MODE` 切换更新方式：
 
-- `auto`（默认）：镜像版本和面板二进制版本都可用，启动时优先使用版本更高且已确认成功的程序；
+- `auto`（默认）：镜像版本和面板二进制版本都可用，启动时优先使用版本更高且已确认成功的程序；如果旧自更新包没有 `version.txt` 而镜像有版本号，则归档旧包并使用镜像；
 - `image`：只运行 Docker 镜像内的 `/app`，适合统一由 CI/CD、Watchtower 或人工 `docker compose pull` 发布；
 - `binary`：优先运行面板一键更新落地到 `/data/app-current` 的二进制，适合不想因镜像更新覆盖临时版本的场景。
 
@@ -18,6 +18,8 @@ docker compose up -d --force-recreate
 ```
 
 更新策略只决定程序来源，不会自动替用户执行 Docker 编排。镜像模式的实际发布仍使用 `TP_IMAGE`、`docker compose pull` 和 `docker compose up -d`。
+
+`auto` 会在启动时读取 `/app/version.txt` 和 `/data/app-current/version.txt`。旧版更新包可能没有后一个文件；此时只要镜像有版本号，就会把旧目录移动到 `/data/app-obsolete-*` 后启动 `/app`。如果镜像和持久化目录都没有版本文件，才按已确认标记维持旧兼容行为。
 
 > **重要：** 如果当前账号列表已经在旧版一键更新后变空，先不要再次点击“一键更新”。
 > `v1.31.31` 及更早版本的旧更新器可能在切换目录前删除原有 `app-previous`，
@@ -80,6 +82,15 @@ docker exec telegram-panel sh -lc 'readlink /proc/1/cwd'
 ```
 
 如果输出是 `/data/app-current`，说明当前在运行「面板一键更新」落地的版本，而不是镜像内 `/app` 版本。
+
+若使用 `auto` 仍显示旧版本，先查看入口日志和版本文件：
+
+```bash
+docker logs --tail 120 telegram-panel | grep telegram-panel-entrypoint
+docker exec telegram-panel sh -lc 'cat /app/version.txt 2>/dev/null; printf "\n-- current --\n"; cat /data/app-current/version.txt 2>/dev/null || true'
+```
+
+镜像有版本号而 `app-current/version.txt` 不存在时，重启容器应归档旧目录并使用 `/app`；部署脚本会通过 `/api/panel/auth/me` 校验这一结果。
 
 ### 切回“手动镜像更新”模式（推荐）
 
