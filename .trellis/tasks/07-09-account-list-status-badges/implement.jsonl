@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend DTO quality context for account-list payload changes"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Avoid adding live per-row Telegram error paths for list rendering"}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend Vue component quality context"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"AccountListItem API type must match backend DTO fields"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Cross-layer account list DTO and UI contract"}

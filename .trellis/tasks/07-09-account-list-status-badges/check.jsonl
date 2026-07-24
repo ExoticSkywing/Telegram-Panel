@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"Verify backend DTO changes"}
+{"file":".trellis/spec/frontend/index.md","reason":"Verify frontend component changes"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify TypeScript type alignment"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify backend/frontend account row contract consistency"}

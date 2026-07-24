@@ -1,0 +1,6 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend service/API guidelines entry point for cooldown enforcement and DTO changes"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"API error response conventions relevant to structured cooldown errors"}
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Backend quality checklist for service-level guard implementation"}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend guidelines entry point for Vue UX updates"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Frontend API type updates for new operation-account and error fields"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Cross-layer contract changes across Account, API DTOs, and Vue UI"}

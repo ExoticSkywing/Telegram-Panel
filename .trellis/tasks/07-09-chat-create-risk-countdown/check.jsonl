@@ -1,0 +1,5 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend quality check entry point"}
+{"file":".trellis/spec/backend/error-handling.md","reason":"Verify structured error response behavior"}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend quality check entry point"}
+{"file":".trellis/spec/frontend/type-safety.md","reason":"Verify TypeScript API types match backend DTOs"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify backend/frontend cooldown contract consistency"}
